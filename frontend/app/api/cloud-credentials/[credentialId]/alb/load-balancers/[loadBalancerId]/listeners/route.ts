@@ -1,0 +1,3 @@
+import { NextRequest, NextResponse } from "next/server";
+const apiBaseUrl = process.env.CERTFLOW_API_URL ?? "http://localhost:8080";
+export async function GET(request: NextRequest, { params }: { params: Promise<{ credentialId: string; loadBalancerId: string }> }) { const { credentialId, loadBalancerId } = await params; const regionId = request.nextUrl.searchParams.get("regionId") ?? ""; const response = await fetch(`${apiBaseUrl}/api/v1/cloud-credentials/${credentialId}/alb/load-balancers/${loadBalancerId}/listeners?regionId=${encodeURIComponent(regionId)}`, { cache: "no-store" }); return new NextResponse(response.body, { status: response.status, headers: { "Content-Type": response.headers.get("Content-Type") ?? "application/json" } }); }

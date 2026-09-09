@@ -1,0 +1,36 @@
+CertFlow
+Copyright 2026 CertFlow Contributors
+
+This product includes software developed by the CertFlow project.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+================================================================================
+
+This project includes the following third-party dependencies:
+
+Backend (Go):
+- golang.org/x/crypto/acme - BSD-3-Clause License
+- Alibaba Cloud Go SDK - Apache License 2.0
+- PostgreSQL Driver - MIT License
+- Other Go dependencies as listed in go.mod
+
+Frontend (Next.js/React):
+- Next.js - MIT License
+- React - MIT License
+- HeroUI - MIT License
+- Other JavaScript dependencies as listed in package.json
+
+For a complete list of dependencies and their licenses, please refer to:
+- backend/go.mod and backend/go.sum
+- frontend/package.json and frontend/package-lock.json

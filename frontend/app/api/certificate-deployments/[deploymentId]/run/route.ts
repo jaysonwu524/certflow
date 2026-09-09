@@ -1,0 +1,3 @@
+import { NextResponse } from "next/server";
+const apiBaseUrl = process.env.CERTFLOW_API_URL ?? "http://localhost:8080";
+export async function POST(_request: Request, { params }: { params: Promise<{ deploymentId: string }> }) { const { deploymentId } = await params; const response = await fetch(`${apiBaseUrl}/api/v1/certificate-deployments/${deploymentId}/run`, { method: "POST", headers: { "X-Request-ID": crypto.randomUUID() }, cache: "no-store" }); return new NextResponse(response.body, { status: response.status, headers: { "Content-Type": response.headers.get("Content-Type") ?? "application/json" } }); }

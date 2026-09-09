@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# CI/CD
+.github
+
+# Documentation
+*.md
+docs/
+DESIGN.md
+LICENSE
+NOTICE
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+*.secret
+
+# Certificates and Keys
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+
+# Tests
+*_test.go
+**/*_test.go
+testdata/
+
+# Build artifacts
+bin/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+tmp/
+temp/
+*.tmp

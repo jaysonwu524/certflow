@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# CI/CD
+.github
+
+# Documentation
+*.md
+docs/
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Dependencies
+node_modules
+
+# Environment
+.env
+.env.*
+*.secret
+
+# Build output
+.next
+out
+dist
+build
+
+# Tests
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+coverage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary
+tmp/
+temp/
+*.tmp
