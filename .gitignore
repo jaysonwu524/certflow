@@ -19,6 +19,7 @@ Thumbs.db
 
 # Environment Variables
 .env
+!.env.example
 .env.local
 .env.*.local
 *.secret
@@ -94,4 +95,3 @@ docker-compose.override.yml
 # Backup files
 *.backup
 *.old
-

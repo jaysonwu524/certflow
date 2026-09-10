@@ -12,7 +12,6 @@ export type Certificate = {
   status: string;
   keyAlgorithm: string;
   validationMode: string;
-  renewEnabled: boolean;
   notAfter: string | null;
   fingerprint: string;
   lastIssuedAt: string | null;
@@ -85,6 +84,22 @@ export type CertificateDeployment = {
   lastError: string;
 };
 
+export type AutomationTask = {
+  id: string;
+  name: string;
+  certificateId: string;
+  certificateName: string;
+  actionType: "renew_certificate" | "upload_ssl" | "deploy_alb";
+  intervalMinutes: number;
+  enabled: boolean;
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastStatus: string;
+  lastError: string;
+  targetCount: number;
+  createdAt: string;
+};
+
 export type ALBRegion = { id: string; name: string };
 export type ALBLoadBalancer = { id: string; name: string; status: string; dnsName: string };
 export type ALBListener = { id: string; port: number; protocol: string; description: string; status: string };
@@ -93,7 +108,8 @@ const apiBaseUrl = process.env.CERTFLOW_API_URL ?? "http://localhost:8080";
 
 async function apiGet<T>(path: string, fallback: T): Promise<{ data: T; unavailable: boolean }> {
   try {
-    const response = await fetch(`${apiBaseUrl}/api/v1${path}`, { cache: "no-store" });
+    const cookie = (await cookies()).toString();
+    const response = await fetch(`${apiBaseUrl}/api/v1${path}`, { cache: "no-store", headers: cookie ? { cookie } : {} });
     if (!response.ok) {
       return { data: fallback, unavailable: true };
     }
@@ -144,3 +160,8 @@ export function getDeploymentTargets() {
 export function getCertificateDeployments() {
   return apiGet<{ data: CertificateDeployment[] }>("/certificate-deployments", { data: [] });
 }
+
+export function getAutomations() {
+  return apiGet<{ data: AutomationTask[] }>("/automations", { data: [] });
+}
+import { cookies } from "next/headers";

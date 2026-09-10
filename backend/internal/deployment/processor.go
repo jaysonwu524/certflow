@@ -30,7 +30,7 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 	var configuration store.DeploymentConfiguration
 	if err := reporter.Step(ctx, "load_deployment_configuration", map[string]string{"certificate_id": claimed.CertificateID, "target_id": claimed.DeploymentTargetID}, func(ctx context.Context) error {
 		var err error
-		configuration, err = p.store.LoadDeploymentConfiguration(ctx, claimed.CertificateID, claimed.DeploymentTargetID)
+		configuration, err = p.store.LoadDeploymentConfiguration(ctx, claimed.AutomationTaskID, claimed.CertificateID, claimed.DeploymentTargetID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return job.Permanent("deployment_configuration_missing", "certificate version or deployment target is unavailable")
 		}
@@ -76,12 +76,27 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 	remoteCertificateID := ""
 	if err := reporter.Step(ctx, "upload_aliyun_certificate", map[string]string{"target": configuration.TargetName}, func(ctx context.Context) error {
 		var err error
-		remoteCertificateID, err = cas.New().UploadUserCertificate(ctx, cas.Credentials(credentials), "certflow-"+configuration.CertificateID[:8]+"-"+configuration.CertificateVersionID[:8], string(append(certificatePEM, chainPEM...)), string(privateKeyPEM))
+		taskSuffix := "legacy"
+		if len(claimed.AutomationTaskID) >= 8 {
+			taskSuffix = claimed.AutomationTaskID[:8]
+		}
+		name := "certflow-" + configuration.CertificateID[:8] + "-" + taskSuffix
+		client := cas.New()
+		if configuration.RemoteCertificateID != "" && configuration.LastUploadedVersionID == configuration.CertificateVersionID {
+			remoteCertificateID = configuration.RemoteCertificateID
+		} else {
+			remoteCertificateID, err = client.UploadUserCertificate(ctx, cas.Credentials(credentials), name, string(append(certificatePEM, chainPEM...)), string(privateKeyPEM))
+		}
 		if err != nil {
 			return classify(err)
 		}
 		if remoteCertificateID == "" {
 			return job.Permanent("aliyun_certificate_upload_failed", "Aliyun Certificate Management did not return a certificate ID")
+		}
+		if claimed.AutomationTaskID != "" {
+			if err := p.store.MarkAutomationRemoteCertificate(ctx, claimed.AutomationTaskID, claimed.DeploymentTargetID, configuration.CertificateVersionID, remoteCertificateID); err != nil {
+				return job.Retryable("deployment_state_save_failed", "certificate synchronized but task state could not be saved", 0)
+			}
 		}
 		return nil
 	}); err != nil {

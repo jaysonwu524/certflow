@@ -51,7 +51,6 @@ export default function NewCertificatePage() {
 		validationMode,
 		domains,
         keyAlgorithm: form.get("keyAlgorithm"),
-        renewEnabled: form.get("renewEnabled") === "on",
         renewBeforeDays: Number(form.get("renewBeforeDays")),
       }),
     });
@@ -122,19 +121,13 @@ export default function NewCertificatePage() {
         </section>
 
         <section className="form-section">
-          <h2>续期策略</h2>
+          <h2>续期窗口</h2>
           <div className="field-grid">
             <div className="field">
               <label htmlFor="renewBeforeDays">提前续期天数</label>
               <input id="renewBeforeDays" name="renewBeforeDays" type="number" min="1" max="90" defaultValue="30" required />
             </div>
-            <div className="field">
-              <label htmlFor="renewEnabled">自动续期</label>
-              <select id="renewEnabled" name="renewEnabled" defaultValue="on">
-                <option value="on">开启</option>
-                <option value="off">关闭</option>
-              </select>
-            </div>
+			<span className="field-help">是否自动续期、上传 SSL 或更新 ALB，请在“自动化”中创建对应任务。</span>
           </div>
         </section>
 

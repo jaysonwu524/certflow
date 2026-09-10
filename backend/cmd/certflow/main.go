@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/regenbio/certflow/internal/certupload"
 	"github.com/regenbio/certflow/internal/config"
 	"github.com/regenbio/certflow/internal/cryptobox"
 	"github.com/regenbio/certflow/internal/deployment"
@@ -20,8 +21,12 @@ import (
 )
 
 func main() {
-	config := config.Load()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	config, err := config.Load()
+	if err != nil {
+		logger.Error("configuration validation failed", "error", err)
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	box, err := cryptobox.New(config.EncryptionKey)
@@ -41,16 +46,21 @@ func main() {
 		logger.Error("database migration failed", "error", err)
 		os.Exit(1)
 	}
+	if _, err := database.EnsureBootstrapAdmin(ctx, config.AdminEmail, config.AdminPassword); err != nil {
+		logger.Error("bootstrap administrator initialization failed", "error", err)
+		os.Exit(1)
+	}
 
 	server := &http.Server{
 		Addr:              config.Addr,
-		Handler:           httpapi.New(database, box).Router(),
+		Handler:           httpapi.New(database, box, time.Duration(config.SessionTTL)*time.Hour, time.Duration(config.SessionIdle)*time.Minute).Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	worker := job.New(database, logger)
 	issuanceProcessor := issuance.New(database, box)
 	worker.Register("issue", issuanceProcessor.Handle)
 	worker.Register("renew", issuanceProcessor.Handle)
+	worker.Register("upload", certupload.New(database, box).Handle)
 	worker.Register("deploy", deployment.New(database, box).Handle)
 	renewalScheduler := renewal.New(database, logger)
 	workerDone := make(chan struct{})

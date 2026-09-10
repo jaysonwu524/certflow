@@ -11,6 +11,7 @@ setup: ## 初始化开发环境
 		cp .env.example .env; \
 		echo "已创建 .env 文件，请编辑并添加必要配置"; \
 	fi
+	@chmod 600 .env
 	cd frontend && npm install
 
 .PHONY: db-up
@@ -31,7 +32,11 @@ db-reset: ## 重置数据库
 
 .PHONY: backend-run
 backend-run: ## 运行后端服务
-	cd backend && go run ./cmd/certflow
+	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup 并填写配置"; exit 1; }; . ./.env; set +a; cd backend && go run ./cmd/certflow
+
+.PHONY: dbinit-run
+dbinit-run: ## 使用 .env 初始化数据库
+	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup 并填写配置"; exit 1; }; . ./.env; set +a; cd backend && go run ./cmd/dbinit
 
 .PHONY: backend-build
 backend-build: ## 构建后端二进制文件
@@ -68,7 +73,7 @@ frontend-lint: ## 运行前端代码检查
 .PHONY: run
 run: db-up ## 启动完整开发环境（数据库+后端+前端）
 	@echo "启动后端服务..."
-	@cd backend && go run ./cmd/certflow &
+	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup 并填写配置"; exit 1; }; . ./.env; set +a; (cd backend && go run ./cmd/certflow) &
 	@echo "等待后端启动..."
 	@sleep 3
 	@echo "启动前端服务..."

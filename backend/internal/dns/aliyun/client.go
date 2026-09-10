@@ -55,6 +55,38 @@ type ZoneRef struct {
 	Name string
 }
 
+type Zone struct {
+	Name string `json:"name"`
+}
+
+// ListZones returns all DNS domains visible to the configured Aliyun
+// credentials. The result is used to build the DNS account allowlist; the
+// allowlist is still enforced independently during certificate issuance.
+func (c *Client) ListZones(ctx context.Context, credentials Credentials) ([]Zone, error) {
+	const pageSize = 100
+	zones := make([]Zone, 0)
+	for pageNumber := 1; ; pageNumber++ {
+		var response describeDomainListResponse
+		if err := c.call(ctx, credentials, "DescribeDomains", url.Values{
+			"PageNumber": {fmt.Sprintf("%d", pageNumber)},
+			"PageSize":   {fmt.Sprintf("%d", pageSize)},
+		}, &response); err != nil {
+			return nil, err
+		}
+		for _, domain := range response.Domains.Domain {
+			name := normalizeName(domain.DomainName)
+			if name != "" {
+				zones = append(zones, Zone{Name: name})
+			}
+		}
+		if len(response.Domains.Domain) == 0 || len(response.Domains.Domain) < pageSize || (response.Domains.TotalCount > 0 && len(zones) >= response.Domains.TotalCount) {
+			break
+		}
+	}
+	sort.Slice(zones, func(i, j int) bool { return zones[i].Name < zones[j].Name })
+	return zones, nil
+}
+
 type RecordRef struct {
 	Zone     string
 	RecordID string
@@ -336,4 +368,13 @@ type describeDomainRecordsResponse struct {
 			Value          string `json:"Value"`
 		} `json:"Record"`
 	} `json:"DomainRecords"`
+}
+
+type describeDomainListResponse struct {
+	Domains struct {
+		Domain []struct {
+			DomainName string `json:"DomainName"`
+		} `json:"Domain"`
+		TotalCount int `json:"TotalCount"`
+	} `json:"Domains"`
 }

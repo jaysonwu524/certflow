@@ -1,0 +1,16 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Button } from "@heroui/react";
+import { KeyRound, UserCircle } from "lucide-react";
+import { PageHeader } from "@/components/page-header";
+
+type User = { email: string; role: "admin" | "user"; status: string; mustChangePassword: boolean; lastLoginAt: string | null; createdAt: string };
+
+export default function ProfilePage() {
+  const [user, setUser] = useState<User | null>(null); const [currentPassword, setCurrentPassword] = useState(""); const [newPassword, setNewPassword] = useState(""); const [confirmPassword, setConfirmPassword] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState(""); const [pending, setPending] = useState(false);
+  useEffect(() => { fetch("/api/auth/me").then((response) => response.ok ? response.json() : null).then(setUser).catch(() => setUser(null)); }, []);
+  async function changePassword(event: React.FormEvent) { event.preventDefault(); setError(""); setMessage(""); if (newPassword.length < 8) { setError("新密码至少需要 8 个字符"); return; } if (newPassword !== confirmPassword) { setError("两次输入的密码不一致"); return; } setPending(true); try { const response = await fetch("/api/auth/change-password", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ currentPassword, newPassword }) }); const body = await response.json().catch(() => null) as { message?: string } | null; if (!response.ok) throw new Error(body?.message ?? "修改密码失败"); setCurrentPassword(""); setNewPassword(""); setConfirmPassword(""); setMessage("密码已修改。"); if (user) setUser({ ...user, mustChangePassword: false }); } catch (reason) { setError(reason instanceof Error ? reason.message : "修改密码失败"); } finally { setPending(false); } }
+  if (!user) return <><PageHeader title="个人中心" description="账户信息与安全设置" /><div className="empty-state">正在加载账户信息...</div></>;
+  return <><PageHeader title="个人中心" description="查看当前账户并修改登录密码。" /><div className="profile-grid"><section className="panel profile-card"><div className="profile-avatar"><UserCircle size={34} /></div><div><h2>{user.email}</h2><p>{user.role === "admin" ? "管理员" : "普通用户"} · {user.status === "active" ? "正常" : "已停用"}</p></div>{user.mustChangePassword ? <div className="form-error">首次登录请立即修改密码。</div> : null}</section><form className="form-section settings-form" onSubmit={changePassword}><h2><KeyRound size={17} /> 修改密码</h2><label className="field"><span>当前密码</span><input value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} type="password" autoComplete="current-password" required /></label><label className="field"><span>新密码</span><input value={newPassword} onChange={(event) => setNewPassword(event.target.value)} type="password" autoComplete="new-password" minLength={8} required /><span className="field-help">至少 8 个字符。</span></label><label className="field"><span>确认新密码</span><input value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} type="password" autoComplete="new-password" minLength={8} required /></label>{message ? <div className="auth-message">{message}</div> : null}{error ? <div className="form-error">{error}</div> : null}<div className="form-actions"><Button type="submit" variant="primary" isDisabled={pending}>{pending ? "正在保存" : "保存新密码"}</Button></div></form></div></>;
+}

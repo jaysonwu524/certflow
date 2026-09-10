@@ -21,8 +21,18 @@ CertFlow 是一个 Go 实现的 TLS 证书生命周期与部署自动化服务�
 - PostgreSQL 初始迁移：账户、云凭证版本、DNS、证书版本、任务、执行记录、outbox 和审计模型。
 - Go API：`/healthz`、`/readyz`、仪表盘、证书列表、执行记录，以及证书草稿创建。
 - Next.js + React + HeroUI 3.0 管理台：概览、证书、执行记录和多 SAN/通配符证书草稿表单。
-- ALB 部署目标管理：先按云凭证查询地域、ALB 和监听器，只允许 HTTPS/QUIC 监听器保存为目标；证书签发成功后可自动或手动排队部署。
+- 自动化任务管理：可配置定期续期证书，或续期成功后将新版本部署到一个或多个 ALB 目标；ALB 目标先按云凭证查询地域、ALB 和监听器，只允许 HTTPS/QUIC 监听器保存。
 - Docker Compose：PostgreSQL 与 Go API 的本地编排。
+
+## 账户与邮件
+
+CertFlow 内置两种角色：`admin` 可以查看全部资源并配置系统，`user` 只能访问自己创建或关联的资源。后端按资源归属强制过滤，前端隐藏并非唯一保护措施。
+
+启动时若数据库还没有管理员，会根据 `CERTFLOW_ADMIN_EMAIL` 和 `CERTFLOW_ADMIN_PASSWORD` 创建首个管理员；默认是 `admin@localhost` / `admin`。已有管理员后环境变量不会覆盖其密码。请在首次登录后立刻修改默认密码。
+
+管理员登录后在“设置”配置 SMTP 发件邮箱。SMTP 密码以加密形式保存在数据库且永不回显。邮件配置完成后，普通用户可通过邮箱验证码注册，并可用密码或邮箱验证码登录。
+
+SMTP 配置兼容飞书格式，例如：`host=smtp.feishu.cn`、`port=465`、`username=cloud@regen-bio.com`、`auth=true`、`encryptType=SSL`、`encryptPort=465`。发件邮箱为空时默认使用 SMTP 用户名。
 
 ACME/DNS 账户 CRUD 与 PostgreSQL 持久化 worker 已实现。worker 会原子领取任务、记录每次执行与步骤、回收过期租约并按错误类别重试。签发 worker 支持 ACME DNS-01：注册或复用 ACME 账户、阿里云 DNS TXT 验证、证书下载校验，以及加密保存不可变证书版本。创建证书后会对已配置的域名和阿里云账号执行真实外部操作；建议先使用 Let's Encrypt staging、专用测试域名和最小权限 RAM 凭证验证。
 
@@ -34,13 +44,29 @@ ALB 部署 worker 会解密证书版本，调用阿里云 SSL 证书管理 `Uplo
 
 ## 本地启动
 
-需要 Docker Desktop 运行后，再执行：
+首次使用先创建本地配置文件：
 
 ```bash
-docker compose up -d postgres
-cd backend
-go run ./cmd/certflow
+cd /Users/wuzijing/Documents/regenbio/single/certflow
+make setup
 ```
+
+编辑 `.env`，至少填写 `CERTFLOW_ENCRYPTION_KEY`；如果使用已有 PostgreSQL，同时填写 `DATABASE_URL`。`.env` 已加入 `.gitignore`，不会提交到 Git；`.env.example` 只包含配置模板和占位符。
+
+使用 Makefile 启动后端：
+
+```bash
+make backend-run
+```
+
+如果使用项目自带的 PostgreSQL：
+
+```bash
+make db-up
+make backend-run
+```
+
+需要初始化独立数据库时执行 `make dbinit-run`。后端会在启动时校验环境、数据库 URL 和加密密钥，配置不完整会立即退出。
 
 另开终端启动管理台：
 
@@ -52,12 +78,20 @@ npm run dev
 
 管理台默认地址为 `http://localhost:3000`，Go API 默认地址为 `http://localhost:8080`。
 
-若使用已有 PostgreSQL，可先创建独立数据库，再将 `DATABASE_URL` 指向它：
+使用 Docker Compose 可直接启动完整服务：
+
+```bash
+CERTFLOW_ENCRYPTION_KEY="$(openssl rand -base64 32)" docker compose up -d --build
+```
+
+打开 `http://localhost:3000`，使用 `.env` 或 Compose 环境变量里的管理员邮箱和密码登录。生产部署必须显式设置强随机的 `CERTFLOW_ENCRYPTION_KEY` 和管理员密码。
+
+生产环境不要依赖 `.env`，由 Docker/Kubernetes Secret、Vault 或云密钥管理服务注入同名环境变量。若使用已有 PostgreSQL，可先创建独立数据库，再把 URL 写入部署环境：
 
 ```bash
 cd backend
 CERTFLOW_ADMIN_DATABASE_URL='postgres://<user>:<password>@<host>:5432/postgres?sslmode=disable' go run ./cmd/dbinit
-DATABASE_URL='postgres://<user>:<password>@<host>:5432/certflow?sslmode=disable' go run ./cmd/certflow
+DATABASE_URL='postgres://<user>:<password>@<host>:5432/certflow?sslmode=disable' CERTFLOW_ENCRYPTION_KEY='<base64-key>' go run ./cmd/certflow
 ```
 
 `CERTFLOW_ENCRYPTION_KEY` 是必需配置，格式为 Base64 编码的 32 字节随机值。开发环境可生成后保存至被 Git 忽略且权限为 `0600` 的 `.env` 文件：

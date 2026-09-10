@@ -121,7 +121,7 @@ MVP 页面与主要交互：
 | `/certificates` | 证书列表，展示域名、有效期、续期状态、最近部署状态 |
 | `/certificates/new` | 分步创建：ACME、逐 SAN 的 DNS/Zone 选择、域名与通配符、密钥算法、DNS-01、自动续期、部署关联 |
 | `/certificates/[id]` | 证书详情、SAN 域名、有效期、关联目标、执行记录；可手动签发、续期和部署 |
-| `/deployment-targets` | 阿里云 ALB 目标的创建、验证、启停与证书关联 |
+| `/automations` | 自动化任务、续期策略与 ALB 部署目标 |
 | `/executions` | 可按状态、任务类型、证书、部署目标、时间筛选的执行记录 |
 | `/executions/[id]` | 工作流步骤、耗时、脱敏错误和重试操作 |
 | `/notification-endpoints` | 失败 Webhook 的配置、启停与测试投递 |
@@ -130,6 +130,7 @@ UI 行为约束：
 
 - 任何触发签发、续期、部署、重试、禁用或删除的操作均使用确认弹窗；成功后跳转或订阅对应执行记录，而不在浏览器中等待长任务完成。
 - 私钥、证书 PEM、AccessKey Secret、Webhook secret 均只提供写入控件，不存在回显控件；编辑时空值表示保持现有 secret。
+- 创建 ACME 账户时，账户私钥 PEM 为可选项：留空由后端按所选算法使用安全随机源生成 PKCS#8 私钥；填写 PEM 则导入已有账户私钥。生成或导入的私钥均只加密保存，不在 API 响应、日志或界面回显。
 - 域名表单逐项校验通配符只在最左侧单标签；提交前提示 `*.example.com` 不覆盖根域和更深层子域，并允许将 `example.com`、`*.example.com`、`*.api.example.com` 添加为同一证书的多个 SAN。
 - 每个 SAN 可继承默认 DNS 账户或选择其 Zone 对应的账户；前端仅展示后端已验证可管理的 Zone，不自行推断 DNS 归属。
 - 凭证类资源在列表和详情中仅显示脱敏摘要、验证状态、最后验证时间和最近错误摘要。
@@ -160,6 +161,8 @@ Go API 应维护 OpenAPI 规范，前端从规范生成 TypeScript 类型和 API
 | `eab_hmac_ciphertext` | 可选、加密后的 EAB HMAC key |
 | `status` | `active`、`disabled`、`error` |
 | `created_at` / `updated_at` | 审计时间 |
+
+账户私钥支持导入已有 PEM，也支持在创建时留空后端自动生成。自动生成仅允许 `ecdsa_p256`、`ecdsa_p384`、`rsa_2048` 和 `rsa_4096`，统一编码为 PKCS#8 PEM；导入模式接受受支持的 RSA/ECDSA PKCS#8、PKCS#1 或 SEC1 PEM。账户创建成功后私钥不可原地替换，需要更换时创建新的 ACME 账户资源。
 
 账户删除采用软删除或禁用。若仍被证书引用，拒绝物理删除。
 
@@ -202,7 +205,7 @@ AccessKey 或角色配置只存在于 `cloud_credentials` 的密文和短暂内�
 | `default_dns_account_id` | 默认 DNS-01 账户；域名验证可单独覆盖 |
 | `key_algorithm` | `rsa_2048`、`rsa_4096`、`ecdsa_p256`、`ecdsa_p384` |
 | `challenge_type` | MVP 固定 `dns_01` |
-| `renew_enabled` | 自动续期开关 |
+| `renew_enabled` | 兼容旧数据的历史字段；新建证书不再使用，自动续期由自动化任务决定 |
 | `renew_before_days` | 剩余多少天内开始续期，默认 30 |
 | `status` | 见 6.1 |
 | `current_certificate_version_id` | 当前可用的不可变证书版本 |
@@ -311,7 +314,21 @@ DNS 账户使用 `cloud_credential_id`，部署目标也使用该外键。首版
 
 ### 5.6 自动化、通知与执行
 
-MVP 不实现任意流程图，而用明确的触发规则：证书签发或续期成功后，对所有 `auto_deploy=true` 的关联创建部署任务。
+MVP 不实现任意流程图，而用明确的自动化任务类型：`renew_certificate` 负责定期检查并续期证书；`upload_ssl` 把当前版本同步到阿里云 SSL 证书管理；`deploy_alb` 上传当前版本并更新选定的 ALB Listener。每个上传/ALB 任务持久化远端 `CertId` 及其对应的证书版本：同一版本重复执行时直接复用 `CertId`，不会重复创建资源；证书产生新版本时，因阿里云 CAS 不提供原地更新用户证书的 API，只能调用 `UploadUserCertificate` 创建新资源，再由 ALB 切换到新的 `CertId`。旧资源不自动删除，待确认无其他引用后再通过受控清理任务回收。续期任务的周期是检查频率，真正是否续期仍由证书的 `renew_before_days` 决定，避免按固定周期重复申请触发 ACME 频率限制。上传和 ALB 任务在创建时、证书版本更新时和手动执行时运行。
+
+`automation_tasks` 表：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` / `name` | 自动化任务标识和名称 |
+| `certificate_id` | 要续期的证书 |
+| `action_type` | `renew_certificate`、`upload_ssl` 或 `deploy_alb` |
+| `interval_minutes` | 调度检查周期，MVP 为 1 小时至 7 天 |
+| `enabled` | 启用或暂停 |
+| `next_run_at` / `last_run_at` | 调度时间 |
+| `last_status` / `last_error` | 最近一次任务状态和脱敏错误 |
+
+`automation_task_targets` 表连接 `deploy_alb` 任务和一个或多个 `deployment_targets`，并按目标保存远端 `CertId` 及其 `last_uploaded_version_id`；这是必要的，因为不同 ALB 目标可能使用不同阿里云账号，证书资源不能跨账号复用。`upload_ssl` 任务需要一个云凭证并在任务级保存远端证书状态，`deploy_alb` 任务在创建时和每次证书版本更新后自动执行“上传 SSL → 更新 ALB”。只有 `renew_certificate` 任务参与周期扫描；暂停或删除该任务即可停止自动续期。旧的 `renew_enabled` 仅作为历史字段保留，不再作为新策略入口。
 
 `notification_endpoints` 表：
 
@@ -341,6 +358,8 @@ MVP 不实现任意流程图，而用明确的触发规则：证书签发或续�
 | `created_at` / `updated_at` | 任务时间 |
 
 `payload` 对部署任务包含 `certificate_version_id`、`certificate_deployment_id`、关联版本、部署目标的完整非敏感配置快照、`cloud_credential_version_id` 和绑定模式。签发任务包含证书配置、SAN 与验证配置的完整非敏感快照、不可变 ACME 账户 ID 和 DNS 凭证版本引用。ACME 账户私钥创建后不可原地替换；需要更换时创建新账户资源。payload 可以引用密文资源，但不能复制 secret。任务创建后不得修改 payload；修改配置应创建新任务。
+
+自动化任务本身不直接执行外部 API。调度器只创建带 `automation_task_id` 的 `renew` job；续期成功保存新证书版本后，针对该任务选择的每个 ALB 目标创建冻结版本的 `deploy` job。每个 job 和执行记录都可独立重试和审计。
 
 `workflow_executions` 是面向用户的执行尝试记录，与 `jobs` 一对多关联：
 
@@ -420,11 +439,12 @@ issued -> disabled
 
 ### 6.3 自动续期
 
-调度器每小时扫描一次满足以下条件的证书：
+调度器每小时扫描一次启用的 `renew_certificate` 自动化任务：
 
 ```text
-renew_enabled = true
-AND status IN ('issued', 'expiring')
+automation_task.enabled = true
+AND automation_task.action_type = 'renew_certificate'
+AND certificate.status IN ('issued', 'expiring')
 AND current_certificate_version.not_after <= now() + renew_before_days
 AND 当前无运行中的 issue/renew 任务
 ```
@@ -517,6 +537,7 @@ worker 定期续租。进程崩溃后，reaper 将过期 lease 的任务归还�
 | `POST` / `GET` | `/api/v1/acme-accounts` | 创建、查询 ACME 账户 |
 | `POST` | `/api/v1/acme-accounts/{id}/verify` | 验证/注册 ACME 账户 |
 | `POST` / `GET` | `/api/v1/cloud-credentials` | 创建、查询云凭证逻辑资源 |
+| `GET` | `/api/v1/cloud-credentials/{id}/dns/zones` | 使用云凭证查询阿里云可管理 Zone，供 DNS 账户多选 allowlist |
 | `POST` | `/api/v1/cloud-credentials/{id}/rotate` | 创建新凭证版本并切换当前版本 |
 | `POST` | `/api/v1/cloud-credentials/{id}/verify` | 验证云凭证及所需最小权限 |
 | `POST` / `GET` | `/api/v1/dns-accounts` | 创建、查询 DNS 账户 |
@@ -526,7 +547,9 @@ worker 定期续租。进程崩溃后，reaper 将过期 lease 的任务归还�
 | `POST` | `/api/v1/certificates/{id}/issue` | 创建首次签发任务 |
 | `POST` | `/api/v1/certificates/{id}/renew` | 创建续期任务 |
 | `POST` | `/api/v1/certificates/{id}/revoke` | 撤销当前版本；需理由和强确认 |
-| `POST` / `GET` | `/api/v1/deployment-targets` | 创建、查询部署目标 |
+| `POST` / `GET` | `/api/v1/deployment-targets` | 创建、查询 ALB 部署目标 |
+| `POST` / `GET` | `/api/v1/automations` | 创建、查询自动化任务 |
+| `POST` | `/api/v1/automations/{id}/run` | 立即排队执行一次自动化任务 |
 | `POST` | `/api/v1/certificates/{id}/deployments` | 绑定部署目标 |
 | `POST` | `/api/v1/certificate-deployments/{id}/deploy` | 手动创建部署任务 |
 | `GET` | `/api/v1/executions` | 按证书、目标、状态查询记录 |
@@ -535,6 +558,8 @@ worker 定期续租。进程崩溃后，reaper 将过期 lease 的任务归还�
 | `POST` / `GET` | `/api/v1/notification-endpoints` | 配置通知端点 |
 | `POST` | `/api/v1/notification-endpoints/{id}/test` | 发送脱敏测试事件 |
 敏感请求字段只可写不可读。`GET` 只返回 `credential_hint`、`has_private_key`、`fingerprint` 等摘要。
+
+旧的 `/deployments` 管理台路径和 `certificate-deployments` API 保留为兼容入口；新功能和新 UI 统一使用 `/automations` 与 `automation_tasks`。
 
 撤销、禁用与删除必须区分：撤销是对 ACME 与证书版本的不可逆外部操作，不自动移除 ALB 上的已部署版本；禁用停止续期与自动部署，但不删除材料；删除仅允许无活动 job 且无启用关联的资源，并默认软删除。撤销请求必须携带 `reason`、通过强确认并记录审计事件；撤销后将当前版本标记为已撤销，是否切换部署目标由操作者显式发起独立部署任务。
 
@@ -571,11 +596,13 @@ Webhook 需要 SSRF 防护：只允许 `https`（开发环境可显式启用 `ht
 - 每个密文携带版本、nonce、AAD 和 key version；AAD 至少绑定资源类型与资源 ID，避免密文跨资源替换。
 - 支持主密钥轮换和按读取重加密。
 
-### 11.2 RBAC
+### 11.2 本地账户、RBAC 与 SMTP
 
-MVP 的身份来源必须明确为企业 OIDC Provider。Go API 校验 issuer、audience、签名和过期时间，并以不可变的 `issuer + subject` 映射本地用户与角色；不以邮箱作为授权主键。Next.js BFF 仅保存 `httpOnly`、`secure`、`sameSite=lax` 会话 cookie，并使用短期、受限 audience 的 token 调用 Go API。浏览器不得持有云凭证、ACME 私钥或后端服务 token。
+MVP 使用本地邮箱账户，角色只有 `admin` 和 `user`。管理员可查看所有资源并配置 SMTP、管理用户；普通用户只能创建、读取和触发 `owner_user_id` 等于自身的账户、云凭证、DNS 账户、证书、ALB 目标、自动化任务及其执行记录。此规则由 Go API 的认证中间件和数据库查询条件共同执行，不能只依赖前端隐藏。
 
-开发环境可显式启用本地 bootstrap 管理员，生产环境启动时拒绝该模式。需定义 OIDC 断连、登出、会话失效、角色变更生效时间，以及 API/worker 使用的独立 service principal。所有状态改变请求都必须具备 CSRF 防护、请求 ID 和操作者身份。
+首次启动时，若没有任何管理员，服务使用 `CERTFLOW_ADMIN_EMAIL` / `CERTFLOW_ADMIN_PASSWORD` 创建管理员，默认 `admin@localhost` / `admin`，并标记为首次修改密码。后续启动绝不覆盖数据库中已有管理员密码。密码使用 bcrypt 哈希；会话 Cookie 仅存随机 token，数据库只存其 SHA-256 哈希，设置 `httpOnly`、`sameSite=lax`，HTTPS 下启用 `secure`，并受绝对与空闲超时控制。
+
+普通用户先请求注册验证码，再用邮箱、验证码和密码创建账户；已注册用户可使用邮箱验证码或密码登录。验证码是一次性 6 位数字，10 分钟过期，连续最多验证 5 次。SMTP 设置仅管理员可读写，密码用主加密密钥加密保存、只写不回显；设置模型包含 `host`、`port`、`username`、`password`、`auth`、`encryptType`（`SSL`、`STARTTLS`、`NONE`）、`encryptPort`、`fromEmail` 和 `fromName`，其中 `fromEmail` 为空时使用用户名。未设置 SMTP 时验证码 API 返回稳定的 `smtp_not_configured` 错误。未来可在不改变资源所有权模型的情况下增加 OIDC 身份提供方。
 
 最小角色：
 
@@ -616,7 +643,7 @@ MVP 的身份来源必须明确为企业 OIDC Provider。Go API 校验 issuer、
 
 ## 13. MVP 交付顺序
 
-1. 单仓库骨架：Go `backend/`、Next.js `frontend/`、本地 Docker Compose、配置加载、PostgreSQL 迁移、OIDC 认证、service principal 和 envelope encryption。
+1. 单仓库骨架：Go `backend/`、Next.js `frontend/`、Docker Compose、配置加载、PostgreSQL 迁移、本地邮箱账户、RBAC 和 envelope encryption。
 2. `cloud_credentials`、ACME 账户、阿里云 DNS 账户的 CRUD、最小权限验证与凭证轮换。
 3. 证书配置、不可变证书版本、逐 SAN DNS/Zone 验证和 DNS-01 首次签发；支持多个 DNS-01 SAN 及多个一层通配符。
 4. PostgreSQL `jobs`、执行记录、outbox、锁、取消、重试与手动重试接口。
@@ -652,4 +679,4 @@ MVP 的身份来源必须明确为企业 OIDC Provider。Go API 校验 issuer、
 10. 一次续期创建不可变的新证书版本；已经排队的部署任务仍使用创建时冻结的证书版本、目标配置和凭证版本，能够准确审计和安全重试。
 11. 同一张证书可签发 `example.com`、`*.example.com`、`*.api.example.com` 等多个 SAN；系统拒绝将 `*.example.com` 错误描述为覆盖 `v1.api.example.com`。
 12. 阿里云 adapter 契约测试验证默认和 SNI 绑定语义、远端证书状态读取与重复部署幂等性；未经验证的云 API 假设不得进入生产逻辑。
-13. 生产认证仅接受配置的 OIDC issuer；本地 bootstrap 管理员、无 CSRF 防护的写操作和长期后端服务 token 均不能启用。
+13. Docker 首次启动创建管理员；管理员可配置 SMTP，普通用户能完成邮箱验证码注册、验证码登录和密码登录，且用户间资源查询和写入均强制隔离。

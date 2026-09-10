@@ -2,6 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -16,18 +21,28 @@ import (
 	"github.com/regenbio/certflow/internal/alb"
 	"github.com/regenbio/certflow/internal/aliyunrpc"
 	"github.com/regenbio/certflow/internal/cryptobox"
+	dnsaliyun "github.com/regenbio/certflow/internal/dns/aliyun"
 	"github.com/regenbio/certflow/internal/domain"
 	"github.com/regenbio/certflow/internal/id"
 	"github.com/regenbio/certflow/internal/store"
 )
 
 type Server struct {
-	store *store.Store
-	box   *cryptobox.Box
+	store       *store.Store
+	box         *cryptobox.Box
+	sessionTTL  time.Duration
+	sessionIdle time.Duration
 }
 
-func New(s *store.Store, box *cryptobox.Box) *Server {
-	return &Server{store: s, box: box}
+func New(s *store.Store, box *cryptobox.Box, sessionDurations ...time.Duration) *Server {
+	server := &Server{store: s, box: box, sessionTTL: 8 * time.Hour, sessionIdle: 30 * time.Minute}
+	if len(sessionDurations) > 0 {
+		server.sessionTTL = sessionDurations[0]
+	}
+	if len(sessionDurations) > 1 {
+		server.sessionIdle = sessionDurations[1]
+	}
+	return server
 }
 
 func (s *Server) Router() http.Handler {
@@ -40,7 +55,19 @@ func (s *Server) Router() http.Handler {
 	})
 	router.Get("/readyz", s.ready)
 
+	router.Route("/api/v1/auth", func(auth chi.Router) {
+		auth.Post("/register/request-code", s.requestRegistrationCode)
+		auth.Post("/register", s.register)
+		auth.Post("/login/request-code", s.requestLoginCode)
+		auth.Post("/login/password", s.loginPassword)
+		auth.Post("/login/code", s.loginCode)
+		auth.Get("/me", s.authMe)
+		auth.Post("/logout", s.logout)
+		auth.Post("/change-password", s.changePassword)
+	})
+
 	router.Route("/api/v1", func(api chi.Router) {
+		api.Use(s.requireAuth)
 		api.Get("/dashboard", s.dashboard)
 		api.Get("/cloud-credentials", s.listCloudCredentials)
 		api.Post("/cloud-credentials", s.createCloudCredential)
@@ -51,6 +78,7 @@ func (s *Server) Router() http.Handler {
 		api.Get("/cloud-credentials/{credentialID}/alb/regions", s.listALBRegions)
 		api.Get("/cloud-credentials/{credentialID}/alb/load-balancers", s.listALBLoadBalancers)
 		api.Get("/cloud-credentials/{credentialID}/alb/load-balancers/{loadBalancerID}/listeners", s.listALBListeners)
+		api.Get("/cloud-credentials/{credentialID}/dns/zones", s.listDNSZones)
 		api.Get("/deployment-targets", s.listDeploymentTargets)
 		api.Post("/deployment-targets", s.createDeploymentTarget)
 		api.Get("/certificate-deployments", s.listCertificateDeployments)
@@ -58,11 +86,20 @@ func (s *Server) Router() http.Handler {
 		api.Post("/certificate-deployments/{deploymentID}/run", s.runCertificateDeployment)
 		api.Post("/certificate-deployments/{deploymentID}/deploy", s.runCertificateDeployment)
 		api.Post("/certificates/{certificateID}/deployments", s.createCertificateDeploymentForCertificate)
+		api.Get("/automations", s.listAutomations)
+		api.Post("/automations", s.createAutomation)
+		api.Post("/automations/{automationID}/run", s.runAutomation)
 		api.Get("/certificates", s.listCertificates)
 		api.Post("/certificates", s.createCertificate)
 		api.Get("/certificates/{certificateID}/manual-challenge", s.getManualChallenge)
 		api.Post("/certificates/{certificateID}/manual-challenge/continue", s.continueManualChallenge)
 		api.Get("/executions", s.listExecutions)
+		api.Get("/users", s.listUsers)
+		api.Post("/users/{userID}/disable", s.disableUser)
+		api.Post("/users/{userID}/enable", s.enableUser)
+		api.Get("/settings/smtp", s.getSMTPSettings)
+		api.Put("/settings/smtp", s.updateSMTPSettings)
+		api.Post("/settings/smtp/test", s.testSMTPSettings)
 	})
 
 	return router
@@ -129,6 +166,17 @@ func (s *Server) createACMEAccount(w http.ResponseWriter, r *http.Request) {
 	if err := validateACMEAccount(input); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_acme_account", err.Error())
 		return
+	}
+
+	if strings.TrimSpace(input.PrivateKey) == "" {
+		privateKey, err := generateACMEPrivateKey(input.PrivateKeyAlgorithm)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "acme_key_generate_failed", "could not generate ACME account key")
+			return
+		}
+		input.PrivateKey = string(privateKey)
+	} else {
+		input.PrivateKey = strings.TrimSpace(input.PrivateKey)
 	}
 
 	accountID := id.New()
@@ -225,6 +273,19 @@ func (s *Server) listALBLoadBalancers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": items})
+}
+
+func (s *Server) listDNSZones(w http.ResponseWriter, r *http.Request) {
+	credentials, ok := s.dnsCredentials(w, r)
+	if !ok {
+		return
+	}
+	zones, err := dnsaliyun.New().ListZones(r.Context(), credentials)
+	if err != nil {
+		writeDNSAliyunError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": zones})
 }
 
 func (s *Server) listDeploymentTargets(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +391,62 @@ func (s *Server) runCertificateDeployment(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
+func (s *Server) listAutomations(w http.ResponseWriter, r *http.Request) {
+	tasks, err := s.store.ListAutomationTasks(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "automations_unavailable", "could not load automation tasks")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": tasks})
+}
+
+func (s *Server) createAutomation(w http.ResponseWriter, r *http.Request) {
+	var input domain.CreateAutomationTaskInput
+	if !decodeBody(w, r, &input) {
+		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	input.CertificateID = strings.TrimSpace(input.CertificateID)
+	if input.IntervalMinutes == 0 {
+		input.IntervalMinutes = 60
+	}
+	if input.ActionType == "renew_and_deploy_alb" {
+		input.ActionType = "deploy_alb"
+	}
+	if err := validateAutomation(input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_automation", err.Error())
+		return
+	}
+	taskID := id.New()
+	if err := s.store.CreateAutomationTask(r.Context(), taskID, input); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "automation_create_failed", err.Error())
+		return
+	}
+	status := "scheduled"
+	if input.Enabled && input.ActionType != "renew_certificate" {
+		var err error
+		status, err = s.store.QueueAutomationRun(r.Context(), taskID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "automation_initial_run_failed", "automation was created but could not be queued")
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": taskID, "status": status})
+}
+
+func (s *Server) runAutomation(w http.ResponseWriter, r *http.Request) {
+	status, err := s.store.QueueAutomationRun(r.Context(), chi.URLParam(r, "automationID"))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "automation_not_found", "automation task was not found or is disabled")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "automation_queue_failed", "could not queue automation task")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": status})
+}
+
 func (s *Server) albCredentials(w http.ResponseWriter, r *http.Request) (alb.Credentials, bool) {
 	return s.albCredentialsForID(w, r, chi.URLParam(r, "credentialID"))
 }
@@ -360,6 +477,14 @@ func (s *Server) albCredentialsForID(w http.ResponseWriter, r *http.Request, cre
 	return alb.Credentials{AccessKeyID: credentials.AccessKeyID, AccessKeySecret: credentials.AccessKeySecret}, true
 }
 
+func (s *Server) dnsCredentials(w http.ResponseWriter, r *http.Request) (dnsaliyun.Credentials, bool) {
+	credentials, ok := s.albCredentialsForID(w, r, chi.URLParam(r, "credentialID"))
+	if !ok {
+		return dnsaliyun.Credentials{}, false
+	}
+	return dnsaliyun.Credentials{AccessKeyID: credentials.AccessKeyID, AccessKeySecret: credentials.AccessKeySecret}, true
+}
+
 func writeAliyunError(w http.ResponseWriter, err error) {
 	var provider *aliyunrpc.Error
 	if errors.As(err, &provider) {
@@ -367,6 +492,15 @@ func writeAliyunError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusBadGateway, "aliyun_unavailable", "Aliyun API is unavailable")
+}
+
+func writeDNSAliyunError(w http.ResponseWriter, err error) {
+	var provider *dnsaliyun.Error
+	if errors.As(err, &provider) {
+		writeError(w, http.StatusUnprocessableEntity, "aliyun_"+provider.Code, provider.Message)
+		return
+	}
+	writeError(w, http.StatusBadGateway, "aliyun_unavailable", "Aliyun DNS API is unavailable")
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
@@ -492,13 +626,66 @@ func validateACMEAccount(input domain.CreateACMEAccountInput) error {
 	if err != nil || address.Address != input.Email {
 		return errors.New("email is invalid")
 	}
-	if block, _ := pem.Decode([]byte(input.PrivateKey)); block == nil {
-		return errors.New("private key must be PEM encoded")
-	}
 	if input.PrivateKeyAlgorithm != "rsa_2048" && input.PrivateKeyAlgorithm != "rsa_4096" && input.PrivateKeyAlgorithm != "ecdsa_p256" && input.PrivateKeyAlgorithm != "ecdsa_p384" {
 		return errors.New("private key algorithm is invalid")
 	}
+	if strings.TrimSpace(input.PrivateKey) != "" {
+		if err := validateACMEPrivateKey([]byte(input.PrivateKey)); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func generateACMEPrivateKey(algorithm string) ([]byte, error) {
+	var (
+		key any
+		err error
+	)
+	switch algorithm {
+	case "ecdsa_p256":
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	case "ecdsa_p384":
+		key, err = ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	case "rsa_2048":
+		key, err = rsa.GenerateKey(rand.Reader, 2048)
+	case "rsa_4096":
+		key, err = rsa.GenerateKey(rand.Reader, 4096)
+	default:
+		return nil, errors.New("private key algorithm is invalid")
+	}
+	if err != nil {
+		return nil, err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
+}
+
+func validateACMEPrivateKey(privateKeyPEM []byte) error {
+	remaining := privateKeyPEM
+	for {
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			break
+		}
+		remaining = rest
+		if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+			switch key.(type) {
+			case *rsa.PrivateKey, *ecdsa.PrivateKey:
+				return nil
+			}
+		}
+		if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+			return nil
+		}
+		if _, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+			return nil
+		}
+	}
+	return errors.New("private key must be a supported PEM-encoded RSA or ECDSA private key")
 }
 
 func validateDNSAccount(input domain.CreateDNSAccountInput) error {
@@ -515,6 +702,28 @@ func validateDNSAccount(input domain.CreateDNSAccountInput) error {
 		if !validZone(zone) {
 			return errors.New("allowed zones must be valid non-wildcard domain names")
 		}
+	}
+	return nil
+}
+
+func validateAutomation(input domain.CreateAutomationTaskInput) error {
+	if input.Name == "" {
+		return errors.New("name is required")
+	}
+	if input.CertificateID == "" {
+		return errors.New("certificate is required")
+	}
+	if input.ActionType != "renew_certificate" && input.ActionType != "upload_ssl" && input.ActionType != "deploy_alb" && input.ActionType != "renew_and_deploy_alb" {
+		return errors.New("automation action type is invalid")
+	}
+	if input.ActionType == "renew_certificate" && (input.IntervalMinutes < 60 || input.IntervalMinutes > 10080) {
+		return errors.New("interval must be between 60 minutes and 7 days")
+	}
+	if input.ActionType == "upload_ssl" && strings.TrimSpace(input.CloudCredentialID) == "" {
+		return errors.New("an Aliyun cloud credential is required for certificate upload")
+	}
+	if (input.ActionType == "deploy_alb" || input.ActionType == "renew_and_deploy_alb") && len(input.DeploymentTargetIDs) == 0 {
+		return errors.New("at least one ALB target is required")
 	}
 	return nil
 }

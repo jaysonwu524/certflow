@@ -12,7 +12,7 @@ export default async function CertificatesPage() {
     <>
       <PageHeader
         title="证书"
-        description="管理 SAN、通配符、续期策略和部署关联"
+        description="管理 SAN、通配符、续期窗口和签发状态"
         actions={<Link className="primary-link" href="/certificates/new"><Plus size={17} /> 新建证书</Link>}
       />
       {unavailable ? <div className="api-warning">CertFlow API 当前不可用。</div> : null}
@@ -22,7 +22,7 @@ export default async function CertificatesPage() {
         ) : (
           <div className="table-wrap">
             <table className="data-table">
-              <thead><tr><th>证书</th><th>密钥算法</th><th>状态</th><th>到期时间</th><th>自动续期</th></tr></thead>
+              <thead><tr><th>证书</th><th>密钥算法</th><th>状态</th><th>到期时间</th><th>验证</th></tr></thead>
               <tbody>
                 {certificates.map((certificate) => (
                   <tr key={certificate.id}>
@@ -30,7 +30,7 @@ export default async function CertificatesPage() {
                     <td className="muted">{certificate.keyAlgorithm}<div className="domain-list">{certificate.validationMode === "manual" ? "手动 TXT" : "自动 DNS"}</div></td>
                     <td><StatusTag status={certificate.status} /></td>
                     <td className="muted">{certificate.notAfter ? formatDate(certificate.notAfter) : "待签发"}</td>
-					<td>{certificate.validationMode === "manual" ? <Link className="table-action" href={`/certificates/${certificate.id}/manual-validation`}>验证记录 <ExternalLink size={14} /></Link> : certificate.renewEnabled ? "已开启" : "已关闭"}</td>
+					<td>{certificate.validationMode === "manual" ? <Link className="table-action" href={`/certificates/${certificate.id}/manual-validation`}>验证记录 <ExternalLink size={14} /></Link> : "自动 DNS"}</td>
                   </tr>
                 ))}
               </tbody>

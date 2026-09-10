@@ -46,6 +46,28 @@ func TestSignExcludesExistingSignature(t *testing.T) {
 	}
 }
 
+func TestListZones(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if r.Form.Get("Action") != "DescribeDomains" || r.Form.Get("PageNumber") != "1" || r.Form.Get("PageSize") != "100" {
+			t.Fatalf("unexpected list zones request: %#v", r.Form)
+		}
+		_, _ = w.Write([]byte(`{"Domains":{"TotalCount":3,"Domain":[{"DomainName":"Z.com."},{"DomainName":" aicun-ai.cn "},{"DomainName":"example.com"}]}}`))
+	}))
+	defer server.Close()
+
+	client := NewWithEndpoint(server.URL, server.Client())
+	zones, err := client.ListZones(context.Background(), Credentials{AccessKeyID: "key", AccessKeySecret: "secret"})
+	if err != nil {
+		t.Fatalf("list zones: %v", err)
+	}
+	if len(zones) != 3 || zones[0].Name != "aicun-ai.cn" || zones[1].Name != "example.com" || zones[2].Name != "z.com" {
+		t.Fatalf("unexpected zones: %#v", zones)
+	}
+}
+
 func TestPresentAndCleanupTXT(t *testing.T) {
 	actions := make([]string, 0, 4)
 	describes := 0

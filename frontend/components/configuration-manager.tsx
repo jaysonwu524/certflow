@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@heroui/react";
 import { KeyRound, Plus } from "lucide-react";
@@ -50,10 +50,16 @@ export function ConfigurationManager({ resource, rows, cloudCredentials = [] }: 
         privateKeyAlgorithm: form.get("privateKeyAlgorithm"),
       };
     } else {
+      const selectedZones = form.getAll("allowedZones").map(String).filter(Boolean);
+      if (selectedZones.length === 0) {
+        setError("请选择至少一个可管理的 Zone");
+        setPending(false);
+        return;
+      }
       payload = {
         ...base,
         cloudCredentialId: form.get("cloudCredentialId"),
-        allowedZones: String(form.get("allowedZones") ?? "").split(/[\n,]/).map((zone) => zone.trim()).filter(Boolean),
+        allowedZones: selectedZones,
       };
     }
 
@@ -124,19 +130,58 @@ function ACMEAccountFields() {
       <div className="field field-wide"><label htmlFor="directoryUrl">ACME Directory URL</label><input id="directoryUrl" name="directoryUrl" type="url" defaultValue="https://acme-v02.api.letsencrypt.org/directory" required /></div>
       <div className="field"><label htmlFor="email">联系邮箱</label><input id="email" name="email" type="email" required /></div>
       <div className="field"><label htmlFor="privateKeyAlgorithm">账户密钥算法</label><select id="privateKeyAlgorithm" name="privateKeyAlgorithm" defaultValue="ecdsa_p256"><option value="ecdsa_p256">ECDSA P-256</option><option value="ecdsa_p384">ECDSA P-384</option><option value="rsa_2048">RSA 2048</option><option value="rsa_4096">RSA 4096</option></select></div>
-      <div className="field field-wide"><label htmlFor="privateKey">账户私钥 PEM</label><textarea id="privateKey" name="privateKey" required autoComplete="off" /><span className="field-help">私钥只会加密保存，创建后不再回显。</span></div>
+      <div className="field field-wide"><label htmlFor="privateKey">账户私钥 PEM（可选）</label><textarea id="privateKey" name="privateKey" autoComplete="off" /><span className="field-help">留空将按所选算法自动生成；仅在导入已有 ACME 账户时填写。私钥只会加密保存，创建后不再回显。</span></div>
     </>
   );
 }
 
 function DNSAccountFields({ cloudCredentials }: { cloudCredentials: CloudCredentialRow[] }) {
+  const [credentialId, setCredentialId] = useState("");
+  const [zones, setZones] = useState<DNSZoneOption[]>([]);
+  const [selectedZones, setSelectedZones] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [zoneError, setZoneError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setZones([]);
+    setSelectedZones([]);
+    setZoneError("");
+    if (!credentialId) return;
+
+    setLoading(true);
+    fetch(`/api/cloud-credentials/${credentialId}/dns/zones`)
+      .then(async (response) => {
+        const body = (await response.json().catch(() => null)) as { data?: DNSZoneOption[]; message?: string } | null;
+        if (!response.ok) throw new Error(body?.message ?? "无法获取可管理的 Zone");
+        return body;
+      })
+      .then((body) => {
+        if (!cancelled) setZones(body?.data ?? []);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setZoneError(error instanceof Error ? error.message : "无法获取可管理的 Zone");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [credentialId]);
+
+  function toggleZone(zone: string, checked: boolean) {
+    setSelectedZones((current) => checked ? [...current, zone] : current.filter((item) => item !== zone));
+  }
+
   return (
     <>
-      <div className="field field-wide"><label htmlFor="cloudCredentialId">云凭证</label><select id="cloudCredentialId" name="cloudCredentialId" required defaultValue=""><option value="" disabled>选择已配置的阿里云凭证</option>{cloudCredentials.map((credential) => <option key={credential.id} value={credential.id}>{credential.name} ({credential.credentialHint})</option>)}</select></div>
-      <div className="field field-wide"><label htmlFor="allowedZones">允许管理的 Zone</label><textarea id="allowedZones" name="allowedZones" required placeholder={"example.com\nexample.net"} /><span className="field-help">每行一个 Zone。DNS-01 仅会在这些 Zone 中创建 challenge TXT 记录。</span></div>
+      <div className="field field-wide"><label htmlFor="cloudCredentialId">云凭证</label><select id="cloudCredentialId" name="cloudCredentialId" required value={credentialId} onChange={(event) => setCredentialId(event.target.value)}><option value="" disabled>选择已配置的阿里云凭证</option>{cloudCredentials.map((credential) => <option key={credential.id} value={credential.id}>{credential.name} ({credential.credentialHint})</option>)}</select></div>
+      <div className="field field-wide"><span id="allowedZonesLabel" className="field-label">允许管理的 Zone</span><div className="zone-picker" role="group" aria-labelledby="allowedZonesLabel">{loading ? <span className="field-help">正在从阿里云获取 Zone...</span> : null}{!loading && !zoneError && !credentialId ? <span className="field-help">先选择云凭证，再加载该凭证可管理的 Zone。</span> : null}{!loading && !zoneError && credentialId && zones.length === 0 ? <span className="field-help">没有可选 Zone。请确认该凭证有 DNS 域名读取权限。</span> : null}{zones.map((zone) => <label className="zone-option" key={zone.name}><input type="checkbox" name="allowedZones" value={zone.name} checked={selectedZones.includes(zone.name)} onChange={(event) => toggleZone(zone.name, event.target.checked)} /><span>{zone.name}</span></label>)}</div>{zoneError ? <span className="field-help zone-error" role="alert">{zoneError}</span> : <span className="field-help">从阿里云获取后多选 Zone。DNS-01 仅会在选中的 Zone 中创建 challenge TXT 记录。</span>}</div>
     </>
   );
 }
+
+type DNSZoneOption = { name: string };
 
 function ConfigurationTable({ resource, rows, empty }: { resource: Resource; rows: ConfigurationManagerProps["rows"]; empty: string }) {
   if (rows.length === 0) return <div className="empty-state">{empty}</div>;

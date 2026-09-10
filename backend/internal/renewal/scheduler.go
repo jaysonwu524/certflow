@@ -37,7 +37,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 }
 
 func (s *Scheduler) scan(ctx context.Context) {
-	count, err := s.store.QueueDueRenewals(ctx)
+	count, err := s.store.QueueDueAutomationTasks(ctx)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			s.logger.Error("queue certificate renewals", "error", err)

@@ -16,7 +16,6 @@ type CertificateSummary struct {
 	Status         string     `json:"status"`
 	KeyAlgorithm   string     `json:"keyAlgorithm"`
 	ValidationMode string     `json:"validationMode"`
-	RenewEnabled   bool       `json:"renewEnabled"`
 	NotAfter       *time.Time `json:"notAfter"`
 	Fingerprint    string     `json:"fingerprint"`
 	LastIssuedAt   *time.Time `json:"lastIssuedAt"`
@@ -42,7 +41,6 @@ type CreateCertificateInput struct {
 	DefaultDNSAccountID string   `json:"defaultDnsAccountId"`
 	Domains             []string `json:"domains"`
 	KeyAlgorithm        string   `json:"keyAlgorithm"`
-	RenewEnabled        bool     `json:"renewEnabled"`
 	RenewBeforeDays     int      `json:"renewBeforeDays"`
 	ValidationMode      string   `json:"validationMode"`
 }
@@ -132,4 +130,30 @@ type CreateCertificateDeploymentInput struct {
 	CertificateID string `json:"certificateId"`
 	TargetID      string `json:"targetId"`
 	AutoDeploy    bool   `json:"autoDeploy"`
+}
+
+type AutomationTaskSummary struct {
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	CertificateID   string     `json:"certificateId"`
+	CertificateName string     `json:"certificateName"`
+	ActionType      string     `json:"actionType"`
+	IntervalMinutes int        `json:"intervalMinutes"`
+	Enabled         bool       `json:"enabled"`
+	NextRunAt       *time.Time `json:"nextRunAt"`
+	LastRunAt       *time.Time `json:"lastRunAt"`
+	LastStatus      string     `json:"lastStatus"`
+	LastError       string     `json:"lastError"`
+	TargetCount     int        `json:"targetCount"`
+	CreatedAt       time.Time  `json:"createdAt"`
+}
+
+type CreateAutomationTaskInput struct {
+	Name                string   `json:"name"`
+	CertificateID       string   `json:"certificateId"`
+	ActionType          string   `json:"actionType"`
+	IntervalMinutes     int      `json:"intervalMinutes"`
+	CloudCredentialID   string   `json:"cloudCredentialId"`
+	DeploymentTargetIDs []string `json:"deploymentTargetIds"`
+	Enabled             bool     `json:"enabled"`
 }

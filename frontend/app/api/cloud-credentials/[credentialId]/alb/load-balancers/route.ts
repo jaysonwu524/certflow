@@ -1,3 +1,3 @@
-import { NextRequest, NextResponse } from "next/server";
-const apiBaseUrl = process.env.CERTFLOW_API_URL ?? "http://localhost:8080";
-export async function GET(request: NextRequest, { params }: { params: Promise<{ credentialId: string }> }) { const { credentialId } = await params; const regionId = request.nextUrl.searchParams.get("regionId") ?? ""; const response = await fetch(`${apiBaseUrl}/api/v1/cloud-credentials/${credentialId}/alb/load-balancers?regionId=${encodeURIComponent(regionId)}`, { cache: "no-store" }); return new NextResponse(response.body, { status: response.status, headers: { "Content-Type": response.headers.get("Content-Type") ?? "application/json" } }); }
+import { NextRequest } from "next/server";
+import { proxyAPI } from "@/lib/api-proxy";
+export async function GET(request: NextRequest, { params }: { params: Promise<{ credentialId: string }> }) { const { credentialId } = await params; const regionId = request.nextUrl.searchParams.get("regionId") ?? ""; return proxyAPI(request, `/cloud-credentials/${credentialId}/alb/load-balancers?regionId=${encodeURIComponent(regionId)}`); }

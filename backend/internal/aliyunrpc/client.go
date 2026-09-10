@@ -19,8 +19,8 @@ import (
 )
 
 type Credentials struct {
-	AccessKeyID     string
-	AccessKeySecret string
+	AccessKeyID     string `json:"access_key_id"`
+	AccessKeySecret string `json:"access_key_secret"`
 }
 
 type Error struct {
