@@ -17,6 +17,7 @@ CREATE TABLE acme_accounts (
 CREATE TABLE cloud_credentials (
     id uuid PRIMARY KEY,
     name text NOT NULL UNIQUE,
+    description text NOT NULL DEFAULT '',
     provider text NOT NULL CHECK (provider = 'aliyun'),
     credential_hint text NOT NULL,
     status text NOT NULL CHECK (status IN ('active', 'disabled', 'invalid', 'rotating')),

@@ -1,15 +1,16 @@
-// Package certupload synchronizes a certificate version to Aliyun Certificate
-// Management without binding it to an ALB listener.
+// Package certupload synchronizes a certificate version to cloud certificate
+// management without binding it to a load balancer listener.
 package certupload
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/regenbio/certflow/internal/aliyunrpc"
-	"github.com/regenbio/certflow/internal/cas"
+	"github.com/regenbio/certflow/internal/cloudprovider"
 	"github.com/regenbio/certflow/internal/cryptobox"
 	"github.com/regenbio/certflow/internal/job"
 	"github.com/regenbio/certflow/internal/store"
@@ -45,7 +46,22 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 		return err
 	}
 
-	var credentials aliyunrpc.Credentials
+	providerName := configuration.CloudCredential.Provider
+	if providerName == "" {
+		providerName = "aliyun"
+	}
+
+	// Get provider instance
+	provider, err := cloudprovider.Get(providerName)
+	if err != nil {
+		return job.Permanent("unsupported_provider", fmt.Sprintf("provider %s not supported", providerName))
+	}
+	uploader, ok := provider.(cloudprovider.CertificateUploadProvider)
+	if !ok {
+		return job.Permanent("provider_capability_missing", "provider does not support certificate upload")
+	}
+
+	var credentials cloudprovider.Credentials
 	var certificatePEM, privateKeyPEM, chainPEM []byte
 	if err := reporter.Step(ctx, "decrypt_upload_material", nil, func(context.Context) error {
 		if configuration.CloudCredential.Status != "active" {
@@ -68,33 +84,61 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 		if err != nil {
 			return job.Permanent("upload_credential_unavailable", "could not decrypt upload cloud credential")
 		}
-		if err := json.Unmarshal(credentialPayload, &credentials); err != nil || credentials.AccessKeyID == "" || credentials.AccessKeySecret == "" {
-			return job.Permanent("invalid_upload_credential", "upload cloud credential is invalid")
+
+		// Unmarshal credentials based on provider
+		credentials, err = cloudprovider.UnmarshalCredentials(providerName, credentialPayload)
+		if err != nil {
+			return job.Permanent("invalid_upload_credential", fmt.Sprintf("upload cloud credential is invalid: %v", err))
 		}
+		if err := provider.VerifyCredentials(ctx, credentials); err != nil {
+			return classify(err)
+		}
+
 		return nil
 	}); err != nil {
 		return err
 	}
 
-	return reporter.StepResult(ctx, "sync_aliyun_certificate", map[string]string{"certificate_version_id": configuration.CertificateVersionID, "remote_certificate_id": configuration.RemoteCertificateID}, func(ctx context.Context) (any, error) {
-		taskSuffix := "legacy"
-		if len(claimed.AutomationTaskID) >= 8 {
-			taskSuffix = claimed.AutomationTaskID[:8]
-		}
-		name := "certflow-" + configuration.CertificateID[:8] + "-" + taskSuffix
-		client := cas.New()
-		remoteID := configuration.RemoteCertificateID
+	return reporter.StepResult(ctx, "sync_certificate", map[string]string{"certificate_version_id": configuration.CertificateVersionID, "remote_certificate_id": configuration.RemoteCertificateID}, func(ctx context.Context) (any, error) {
+		remoteID := ""
 		mode := "reuse"
-		var err error
-		if remoteID == "" || configuration.LastUploadedVersionID != configuration.CertificateVersionID {
-			remoteID, err = client.UploadUserCertificate(ctx, cas.Credentials(credentials), name, string(append(certificatePEM, chainPEM...)), string(privateKeyPEM))
+		if err := p.store.WithCertificateCloudAssetLock(ctx, configuration.CertificateVersionID, configuration.CloudCredential.ID, func(ctx context.Context) error {
+			latest, err := p.store.LoadUploadConfiguration(ctx, claimed.AutomationTaskID, claimed.CertificateID, payload.CloudCredentialID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return job.Permanent("upload_configuration_missing", "certificate version or cloud credential is unavailable")
+			}
+			if err != nil {
+				return job.Retryable("upload_configuration_load_failed", "could not reload upload configuration", 0)
+			}
+			if latest.RemoteCertificateID != "" && latest.LastUploadedVersionID == configuration.CertificateVersionID {
+				remoteID = latest.RemoteCertificateID
+				return nil
+			}
+
+			taskSuffix := "legacy"
+			if len(claimed.AutomationTaskID) >= 8 {
+				taskSuffix = claimed.AutomationTaskID[:8]
+			}
+			name := "certflow-" + configuration.CertificateID[:8] + "-" + taskSuffix
+			remoteID, err = uploader.UploadCertificate(ctx, credentials, cloudprovider.UploadCertificateRequest{
+				Name:           name,
+				CertificatePEM: string(certificatePEM),
+				PrivateKeyPEM:  string(privateKeyPEM),
+				ChainPEM:       string(chainPEM),
+			})
+			if err != nil {
+				return classify(err)
+			}
+			if remoteID == "" {
+				return job.Permanent("certificate_upload_failed", "Certificate Management did not return a certificate ID")
+			}
 			mode = "create"
-		}
-		if err != nil {
-			return nil, classify(err)
-		}
-		if remoteID == "" {
-			return nil, job.Permanent("aliyun_certificate_upload_failed", "Aliyun Certificate Management did not return a certificate ID")
+			if err := p.store.MarkCertificateCloudAsset(ctx, configuration.CertificateID, configuration.CertificateVersionID, configuration.CloudCredential.ID, remoteID); err != nil {
+				return job.Retryable("upload_asset_state_save_failed", "certificate uploaded but cloud asset state could not be saved", 0)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		if err := p.store.MarkAutomationUploadSucceeded(ctx, claimed.AutomationTaskID, configuration.CertificateVersionID, remoteID); err != nil {
 			return nil, job.Retryable("upload_state_save_failed", "certificate uploaded but synchronization state could not be saved", 0)

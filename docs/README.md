@@ -12,6 +12,12 @@
   - 关键流程说明
   - MVP 交付顺序
 
+- **[FRONTEND_REDESIGN.md](./FRONTEND_REDESIGN.md)** - 控制台前端重构设计
+  - 资源详情、新增与编辑 Modal 工作流
+  - 国际化、浅深色主题与响应式规范
+  - 组件、数据访问与测试架构
+  - API 契约补充与迁移验收标准
+
 ### 品牌与视觉
 - **[LOGO_DESIGN_BRIEF.md](./LOGO_DESIGN_BRIEF.md)** - Logo 设计简报
   - "证书杀手" 品牌定位

@@ -2,6 +2,24 @@ package domain
 
 import "time"
 
+// RealtimeEvent is a non-sensitive state transition suitable for browser
+// delivery and for future notification-channel consumers.
+type RealtimeEvent struct {
+	ID           int64     `json:"id"`
+	OwnerUserID  string    `json:"-"`
+	Topic        string    `json:"topic"`
+	ResourceType string    `json:"resourceType"`
+	ResourceID   string    `json:"resourceId"`
+	Status       string    `json:"status"`
+	Payload      any       `json:"payload"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+type Notification struct {
+	RealtimeEvent
+	ReadAt *time.Time `json:"readAt"`
+}
+
 type Dashboard struct {
 	ActiveCertificates int `json:"activeCertificates"`
 	ExpiringSoon       int `json:"expiringSoon"`
@@ -21,6 +39,70 @@ type CertificateSummary struct {
 	LastIssuedAt   *time.Time `json:"lastIssuedAt"`
 	LastError      string     `json:"lastError"`
 	CreatedAt      time.Time  `json:"createdAt"`
+}
+
+// CertificateDetail extends the list projection with editable certificate
+// configuration. Sensitive material is intentionally never returned.
+type CertificateDetail struct {
+	CertificateSummary
+	AcmeAccountID       string `json:"acmeAccountId"`
+	DefaultDNSAccountID string `json:"defaultDnsAccountId"`
+	RenewBeforeDays     int    `json:"renewBeforeDays"`
+}
+
+// CertificateVersionSummary is safe metadata for a historical issued version.
+// It intentionally omits encrypted certificate and private-key material.
+type CertificateVersionSummary struct {
+	ID               string     `json:"id"`
+	SerialNumber     string     `json:"serialNumber"`
+	Fingerprint      string     `json:"fingerprint"`
+	NotBefore        time.Time  `json:"notBefore"`
+	NotAfter         time.Time  `json:"notAfter"`
+	IssuedAt         time.Time  `json:"issuedAt"`
+	RevokedAt        *time.Time `json:"revokedAt"`
+	RevocationReason string     `json:"revocationReason"`
+	IsCurrent        bool       `json:"isCurrent"`
+}
+
+type CertificateResourceReference struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+}
+
+type CertificateAutomationReference struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	ActionType string `json:"actionType"`
+	Enabled    bool   `json:"enabled"`
+	LastStatus string `json:"lastStatus"`
+}
+
+type CertificateDeploymentReference struct {
+	ID             string     `json:"id"`
+	TargetID       string     `json:"targetId"`
+	TargetName     string     `json:"targetName"`
+	Enabled        bool       `json:"enabled"`
+	AutoDeploy     bool       `json:"autoDeploy"`
+	LastDeployedAt *time.Time `json:"lastDeployedAt"`
+	LastError      string     `json:"lastError"`
+}
+
+type CertificateRelations struct {
+	ACMEAccount *CertificateResourceReference    `json:"acmeAccount"`
+	DNSAccount  *CertificateResourceReference    `json:"dnsAccount"`
+	Automations []CertificateAutomationReference `json:"automations"`
+	Deployments []CertificateDeploymentReference `json:"deployments"`
+}
+
+// ManualDNSCheck reports what the resolver can observe before the operator
+// asks ACME to validate the DNS-01 records. It is advisory, not ACME proof.
+type ManualDNSCheck struct {
+	FQDN     string   `json:"fqdn"`
+	Expected string   `json:"expected"`
+	Observed []string `json:"observed"`
+	Matched  bool     `json:"matched"`
+	Error    string   `json:"error"`
 }
 
 type ExecutionSummary struct {
@@ -48,26 +130,39 @@ type CreateCertificateInput struct {
 type CloudCredentialSummary struct {
 	ID             string     `json:"id"`
 	Name           string     `json:"name"`
+	Description    string     `json:"description"`
 	Provider       string     `json:"provider"`
+	AccessKeyID    string     `json:"accessKeyId"`
 	CredentialHint string     `json:"credentialHint"`
 	Status         string     `json:"status"`
 	LastVerifiedAt *time.Time `json:"lastVerifiedAt"`
+	LastError      string     `json:"lastError"`
 	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 type CreateCloudCredentialInput struct {
-	Name            string `json:"name"`
-	AccessKeyID     string `json:"accessKeyId"`
-	AccessKeySecret string `json:"accessKeySecret"`
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Provider    string                 `json:"provider"`    // Cloud provider: aliyun, aws, tencentcloud, etc.
+	Credentials map[string]interface{} `json:"credentials"` // Provider-specific credentials
+	// Deprecated: Use Credentials map instead
+	AccessKeyID     string `json:"accessKeyId,omitempty"`
+	AccessKeySecret string `json:"accessKeySecret,omitempty"`
 }
 
 type ACMEAccountSummary struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	DirectoryURL string    `json:"directoryUrl"`
-	Email        string    `json:"email"`
-	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID                  string     `json:"id"`
+	Name                string     `json:"name"`
+	DirectoryURL        string     `json:"directoryUrl"`
+	AccountURL          string     `json:"accountUrl"`
+	Email               string     `json:"email"`
+	PrivateKeyAlgorithm string     `json:"privateKeyAlgorithm"`
+	Status              string     `json:"status"`
+	LastVerifiedAt      *time.Time `json:"lastVerifiedAt"`
+	LastError           string     `json:"lastError"`
+	CertificateCount    int        `json:"certificateCount"`
+	AutomationCount     int        `json:"automationCount"`
+	CreatedAt           time.Time  `json:"createdAt"`
 }
 
 type CreateACMEAccountInput struct {
@@ -79,18 +174,22 @@ type CreateACMEAccountInput struct {
 }
 
 type DNSAccountSummary struct {
-	ID                string     `json:"id"`
-	Name              string     `json:"name"`
-	Provider          string     `json:"provider"`
-	CloudCredentialID string     `json:"cloudCredentialId"`
-	AllowedZones      []string   `json:"allowedZones"`
-	Status            string     `json:"status"`
-	LastVerifiedAt    *time.Time `json:"lastVerifiedAt"`
-	CreatedAt         time.Time  `json:"createdAt"`
+	ID                          string     `json:"id"`
+	Name                        string     `json:"name"`
+	Description                 string     `json:"description"`
+	Provider                    string     `json:"provider"`
+	CloudCredentialID           string     `json:"cloudCredentialId"`
+	AllowedZones                []string   `json:"allowedZones"`
+	Status                      string     `json:"status"`
+	LastVerifiedAt              *time.Time `json:"lastVerifiedAt"`
+	LastError                   string     `json:"lastError"`
+	VerifiedCredentialVersionID string     `json:"verifiedCredentialVersionId"`
+	CreatedAt                   time.Time  `json:"createdAt"`
 }
 
 type CreateDNSAccountInput struct {
 	Name              string   `json:"name"`
+	Description       string   `json:"description"`
 	CloudCredentialID string   `json:"cloudCredentialId"`
 	AllowedZones      []string `json:"allowedZones"`
 }
@@ -133,19 +232,37 @@ type CreateCertificateDeploymentInput struct {
 }
 
 type AutomationTaskSummary struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	CertificateID   string     `json:"certificateId"`
-	CertificateName string     `json:"certificateName"`
-	ActionType      string     `json:"actionType"`
-	IntervalMinutes int        `json:"intervalMinutes"`
-	Enabled         bool       `json:"enabled"`
-	NextRunAt       *time.Time `json:"nextRunAt"`
-	LastRunAt       *time.Time `json:"lastRunAt"`
-	LastStatus      string     `json:"lastStatus"`
-	LastError       string     `json:"lastError"`
-	TargetCount     int        `json:"targetCount"`
-	CreatedAt       time.Time  `json:"createdAt"`
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	CertificateID     string     `json:"certificateId"`
+	CertificateName   string     `json:"certificateName"`
+	ActionType        string     `json:"actionType"`
+	IntervalMinutes   int        `json:"intervalMinutes"`
+	Enabled           bool       `json:"enabled"`
+	NextRunAt         *time.Time `json:"nextRunAt"`
+	LastRunAt         *time.Time `json:"lastRunAt"`
+	LastStatus        string     `json:"lastStatus"`
+	LastError         string     `json:"lastError"`
+	TargetCount       int        `json:"targetCount"`
+	CloudCredentialID string     `json:"cloudCredentialId"`
+	TargetIDs         []string   `json:"targetIds"`
+	CreatedAt         time.Time  `json:"createdAt"`
+}
+
+type AutomationRunSummary struct {
+	ID                   string     `json:"id"`
+	AutomationTaskID     string     `json:"automationTaskId"`
+	CertificateID        string     `json:"certificateId"`
+	CertificateVersionID string     `json:"certificateVersionId"`
+	TriggerType          string     `json:"triggerType"`
+	Status               string     `json:"status"`
+	TotalJobs            int        `json:"totalJobs"`
+	SucceededJobs        int        `json:"succeededJobs"`
+	FailedJobs           int        `json:"failedJobs"`
+	StartedAt            *time.Time `json:"startedAt"`
+	FinishedAt           *time.Time `json:"finishedAt"`
+	LastError            string     `json:"lastError"`
+	CreatedAt            time.Time  `json:"createdAt"`
 }
 
 type CreateAutomationTaskInput struct {

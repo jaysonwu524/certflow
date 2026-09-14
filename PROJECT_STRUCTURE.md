@@ -15,6 +15,7 @@ certflow/
 ├── 📁 docs/                         # 📚 文档目录
 │   ├── README.md                    # 文档索引
 │   ├── ARCHITECTURE.md              # 系统架构设计文档
+│   ├── FRONTEND_REDESIGN.md          # 控制台前端重构设计
 │   ├── LOGO_DESIGN_BRIEF.md        # Logo 设计简报
 │   ├── OPENSOURCE_SUMMARY.md        # 开源工作总结
 │   └── OPENSOURCE_CHECKLIST.md      # 开源发布清单

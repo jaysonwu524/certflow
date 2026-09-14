@@ -77,7 +77,7 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 			return job.Permanent("invalid_acme_key", "ACME account key is not a supported private key")
 		}
 		if configuration.ValidationMode == "auto" {
-			if configuration.DNSAccount.Status != "active" || configuration.CloudCredential.Status != "active" {
+			if configuration.DNSAccount.Status != "active" || configuration.CloudCredential.Status != "active" || configuration.DNSAccount.VerifiedCredentialVersionID == "" || configuration.DNSAccount.VerifiedCredentialVersionID != configuration.CloudCredential.VersionID {
 				return job.Permanent("issuance_configuration_inactive", "DNS account or cloud credential is inactive")
 			}
 			if configuration.DNSAccount.Provider != "aliyun" {
@@ -125,6 +125,17 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 		return p.handleManualDNS01(issueContext, claimed, reporter, configuration, acmeClient)
 	}
 
+	dnsClient := aliyundns.New()
+	credentials := aliyundns.Credentials{AccessKeyID: cloudCredential.AccessKeyID, AccessKeySecret: cloudCredential.AccessKeySecret}
+	if err := reporter.Step(issueContext, "verify_dns_credentials", nil, func(ctx context.Context) error {
+		if _, err := dnsClient.ListZones(ctx, credentials); err != nil {
+			return classifyDNSError(err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	var order *acme.Order
 	if err := reporter.Step(issueContext, "create_acme_order", map[string]int{"domain_count": len(configuration.Domains)}, func(ctx context.Context) error {
 		var err error
@@ -143,8 +154,6 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 		return job.Permanent("invalid_acme_order", "ACME provider returned an empty order response")
 	}
 
-	dnsClient := aliyundns.New()
-	credentials := aliyundns.Credentials{AccessKeyID: cloudCredential.AccessKeyID, AccessKeySecret: cloudCredential.AccessKeySecret}
 	records := make([]aliyundns.RecordRef, 0, len(order.AuthzURLs))
 	issueErr := reporter.StepResult(issueContext, "present_dns_challenges", map[string]int{"authorization_count": len(order.AuthzURLs)}, func(ctx context.Context) (any, error) {
 		for _, authorizationURL := range order.AuthzURLs {

@@ -12,6 +12,10 @@ export async function proxyAPI(request: Request, path: string, init: RequestInit
   const upstream = await fetch(`${apiBaseUrl}/api/v1${path}`, { ...init, headers, cache: "no-store" });
   const responseHeaders = new Headers();
   responseHeaders.set("Content-Type", upstream.headers.get("Content-Type") ?? "application/json");
+  for (const name of ["Cache-Control", "X-Accel-Buffering"]) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders.set(name, value);
+  }
   for (const value of upstream.headers.getSetCookie()) responseHeaders.append("set-cookie", value);
   return new NextResponse(upstream.body, { status: upstream.status, headers: responseHeaders });
 }

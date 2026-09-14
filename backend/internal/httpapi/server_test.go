@@ -7,8 +7,24 @@ import (
 	"encoding/pem"
 	"testing"
 
+	"github.com/regenbio/certflow/internal/cloudprovider"
 	"github.com/regenbio/certflow/internal/domain"
 )
+
+func TestInvalidDNSZonesOnlyReturnsZonesOutsideProviderAllowlist(t *testing.T) {
+	available := []cloudprovider.DNSZone{{Name: "example.com"}, {Name: "aicun-ai.cn"}}
+	got := invalidDNSZones(available, []string{"example.com", "missing.test", "AICUN-AI.CN"})
+	if len(got) != 1 || got[0] != "missing.test" {
+		t.Fatalf("invalid zones = %#v, want [missing.test]", got)
+	}
+}
+
+func TestValidateDNSAccountDescriptionLimit(t *testing.T) {
+	input := domain.CreateDNSAccountInput{Name: "dns", CloudCredentialID: "credential", AllowedZones: []string{"example.com"}, Description: string(make([]byte, 241))}
+	if err := validateDNSAccount(input); err == nil {
+		t.Fatal("expected an overlong DNS description to be rejected")
+	}
+}
 
 func TestGenerateACMEPrivateKey(t *testing.T) {
 	tests := []struct {

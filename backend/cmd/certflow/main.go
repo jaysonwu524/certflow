@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/regenbio/certflow/internal/certupload"
+	_ "github.com/regenbio/certflow/internal/cloudprovider/aliyun"
 	"github.com/regenbio/certflow/internal/config"
 	"github.com/regenbio/certflow/internal/cryptobox"
 	"github.com/regenbio/certflow/internal/deployment"
@@ -51,11 +52,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := &http.Server{
+	apiServer := httpapi.New(database, box, time.Duration(config.SessionTTL)*time.Hour, time.Duration(config.SessionIdle)*time.Minute)
+	httpServer := &http.Server{
 		Addr:              config.Addr,
-		Handler:           httpapi.New(database, box, time.Duration(config.SessionTTL)*time.Hour, time.Duration(config.SessionIdle)*time.Minute).Router(),
+		Handler:           apiServer.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	httpServer.RegisterOnShutdown(apiServer.StopRealtimeStreams)
 	worker := job.New(database, logger)
 	issuanceProcessor := issuance.New(database, box)
 	worker.Register("issue", issuanceProcessor.Handle)
@@ -69,10 +72,11 @@ func main() {
 		worker.Run(ctx)
 	}()
 	go renewalScheduler.Run(ctx)
+	go apiServer.RunRealtime(ctx, logger)
 
 	go func() {
 		logger.Info("certflow api started", "address", config.Addr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error("http server failed", "error", err)
 			stop()
 		}
@@ -81,7 +85,7 @@ func main() {
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("http shutdown failed", "error", err)
 	}
 	select {

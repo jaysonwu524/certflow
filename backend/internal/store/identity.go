@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -98,6 +99,16 @@ func (s *Store) CreateUser(ctx context.Context, email, password string) (User, e
 
 func (s *Store) CreateVerificationCode(ctx context.Context, email, purpose string) (string, error) {
 	email = NormalizeEmail(email)
+	var lastCreatedAt time.Time
+	if err := s.pool.QueryRow(ctx, `
+		SELECT created_at FROM email_verification_codes
+		WHERE email = $1 AND purpose = $2
+		ORDER BY created_at DESC LIMIT 1
+	`, email, purpose).Scan(&lastCreatedAt); err == nil && time.Since(lastCreatedAt) < time.Minute {
+		return "", ErrVerificationRateLimited
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
 	code, err := randomCode()
 	if err != nil {
 		return "", err
@@ -163,10 +174,11 @@ func (s *Store) ConsumeVerificationCode(ctx context.Context, email, purpose, cod
 }
 
 var (
-	ErrInvalidCode        = fmt.Errorf("verification code is invalid or expired")
-	ErrInvalidCredentials = fmt.Errorf("email or password is incorrect")
-	ErrAccountDisabled    = fmt.Errorf("account is disabled")
-	ErrAccountLocked      = fmt.Errorf("account is temporarily locked")
+	ErrInvalidCode             = fmt.Errorf("verification code is invalid or expired")
+	ErrVerificationRateLimited = fmt.Errorf("verification code was requested too recently")
+	ErrInvalidCredentials      = fmt.Errorf("email or password is incorrect")
+	ErrAccountDisabled         = fmt.Errorf("account is disabled")
+	ErrAccountLocked           = fmt.Errorf("account is temporarily locked")
 )
 
 func (s *Store) AuthenticatePassword(ctx context.Context, email, password string) (User, error) {
@@ -245,6 +257,65 @@ func (s *Store) SessionUser(ctx context.Context, token string, idleTTL time.Dura
 
 func (s *Store) RevokeSession(ctx context.Context, token string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, tokenHash(token))
+	return err
+}
+
+func (s *Store) CreateRefreshToken(ctx context.Context, user User, ttl time.Duration, persistent bool) (RefreshSession, error) {
+	token, err := randomToken()
+	if err != nil {
+		return RefreshSession{}, err
+	}
+	session := RefreshSession{Token: token, ExpiresAt: time.Now().UTC().Add(ttl), Persistent: persistent, User: user}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO auth_refresh_tokens (id, user_id, token_hash, expires_at, persistent)
+		VALUES ($1, $2, $3, $4, $5)
+	`, id.New(), user.ID, tokenHash(token), session.ExpiresAt, persistent)
+	return session, err
+}
+
+// RotateRefreshToken revokes the presented token and atomically issues a new one.
+func (s *Store) RotateRefreshToken(ctx context.Context, token string, ttl time.Duration) (RefreshSession, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RefreshSession{}, err
+	}
+	defer tx.Rollback(ctx)
+	var user User
+	var persistent bool
+	err = tx.QueryRow(ctx, `
+		SELECT u.id, u.email, u.role, u.status, u.must_change_password, u.last_login_at, u.created_at, t.persistent
+		FROM auth_refresh_tokens t JOIN users u ON u.id = t.user_id
+		WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND t.expires_at > now() AND u.deleted_at IS NULL
+		FOR UPDATE
+	`, tokenHash(token)).Scan(&user.ID, &user.Email, &user.Role, &user.Status, &user.MustChangePassword, &user.LastLoginAt, &user.CreatedAt, &persistent)
+	if err != nil {
+		return RefreshSession{}, err
+	}
+	if user.Status != "active" {
+		return RefreshSession{}, ErrAccountDisabled
+	}
+	if _, err := tx.Exec(ctx, `UPDATE auth_refresh_tokens SET revoked_at = now() WHERE token_hash = $1`, tokenHash(token)); err != nil {
+		return RefreshSession{}, err
+	}
+	newToken, err := randomToken()
+	if err != nil {
+		return RefreshSession{}, err
+	}
+	session := RefreshSession{Token: newToken, ExpiresAt: time.Now().UTC().Add(ttl), Persistent: persistent, User: user}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO auth_refresh_tokens (id, user_id, token_hash, expires_at, persistent)
+		VALUES ($1, $2, $3, $4, $5)
+	`, id.New(), user.ID, tokenHash(newToken), session.ExpiresAt, persistent); err != nil {
+		return RefreshSession{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RefreshSession{}, err
+	}
+	return session, nil
+}
+
+func (s *Store) RevokeRefreshToken(ctx context.Context, token string) error {
+	_, err := s.pool.Exec(ctx, `UPDATE auth_refresh_tokens SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, tokenHash(token))
 	return err
 }
 

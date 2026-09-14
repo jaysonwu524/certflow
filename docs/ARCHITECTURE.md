@@ -108,6 +108,12 @@ Go 后端位于 `backend/`，Next.js 管理台位于 `frontend/`；二者独立�
 
 管理后台使用 Next.js、React 与 HeroUI 3.0。前端是受 RBAC 保护的操作界面，不承载证书签发、DNS 验证、续期、部署或密钥加密等业务逻辑；这些操作全部由 Go API 和 worker 执行。
 
+### 3.3 实时状态与通知
+
+浏览器通过一个按用户权限过滤的 `GET /api/v1/events` SSE 流接收证书与执行状态变化。流以 PostgreSQL `LISTEN/NOTIFY` 唤醒 API 实例，以 `realtime_events` 保存可重放、非敏感的事件摘要；浏览器保存最后事件游标，断线后以 `Last-Event-ID` 补发，服务端每 20 秒发送 heartbeat，避免反向代理空闲断开。
+
+SSE 只负责将状态变化及时呈现给已登录用户，数据库和 REST API 仍是状态真相。标准用户仅能收到自己资源的事件，管理员可接收全部事件。`realtime_events` 是站内提示与未来邮件、Webhook、飞书/钉钉等通知渠道的统一轻量事件契约，默认保留 30 天；外部通知仍应由 outbox 消费者异步投递，不能阻塞签发或部署 worker。
+
 前端采用 Next.js App Router。优先使用 React Server Components 获取首次页面数据，仅将筛选、表单、确认弹窗、轮询中的执行详情等需要浏览器交互的区域实现为 Client Components。HeroUI 3.0 提供表格、表单、Select、Modal、Drawer、Tabs、Toast、Badge 和 Skeleton 等基础 UI，领域组件封装在 `frontend/components/`，避免在页面中散落重复的状态样式和表单逻辑。
 
 MVP 页面与主要交互：
@@ -115,7 +121,7 @@ MVP 页面与主要交互：
 | 路由 | 内容 |
 | --- | --- |
 | `/dashboard` | 证书总数、即将到期数、最近失败任务、近期执行动态 |
-| `/cloud-credentials` | 阿里云凭证列表、创建、轮换、验证与禁用；仅展示脱敏摘要 |
+| `/cloud-credentials` | 阿里云凭证列表、创建、验证、启用与禁用；AccessKey 不可修改，仅展示非敏感标识 |
 | `/acme-accounts` | ACME 账户列表、创建、验证、禁用 |
 | `/dns-accounts` | DNS 账户列表、创建、凭证连通性验证、禁用 |
 | `/certificates` | 证书列表，展示域名、有效期、续期状态、最近部署状态 |
@@ -177,7 +183,9 @@ Go API 应维护 OpenAPI 规范，前端从规范生成 TypeScript 类型和 API
 | `provider` | MVP 为 `aliyun` |
 | `cloud_credential_id` | 阿里云云凭证引用 |
 | `config_version` | 非敏感 DNS 配置的 schema 版本 |
+| `description` | 可选的人类可读说明 |
 | `allowed_zones` | 可管理 Zone allowlist |
+| `verified_credential_version_id` | 最近一次通过读写检查的云凭证版本 |
 | `status` | `active`、`disabled`、`invalid` |
 | `last_verified_at` | 最近连通性验证时间 |
 | `last_error` | 脱敏后的最近错误 |
@@ -187,11 +195,14 @@ DNS 账户的非敏感配置逻辑结构：
 ```json
 {
   "cloud_credential_id": "cloud_credential_uuid",
+  "description": "production DNS validation",
   "allowed_zones": ["example.com", "example.net"]
 }
 ```
 
 AccessKey 或角色配置只存在于 `cloud_credentials` 的密文和短暂内存中。建议为 RAM 用户或角色授予最小 DNS 修改权限，并限制到 `allowed_zones` 中的实际托管域名。
+
+创建、编辑和手动验证 DNS 账户时，服务端先调用 Provider 获取真实可管理 Zone，并要求提交的 allowlist 是其子集；随后为每个选中的 Zone 创建随机临时 TXT 记录并立即安全删除。只有读、写、删权限均验证成功，账户才会标记为 `active`。云凭证失效或禁用会使关联 DNS 账户变为 `invalid`，必须重新验证；签发任务还会比较 `verified_credential_version_id`，避免静默使用未经验证的新凭证版本。
 
 ### 5.3 证书与域名
 
@@ -268,7 +279,7 @@ AccessKey 或角色配置只存在于 `cloud_credentials` 的密文和短暂内�
 
 `cloud_credential_versions` 表保存不可变的凭证版本，包含 `id`、`cloud_credential_id`、`credentials_ciphertext`、`credential_hint`、`created_at`、`retired_at` 与 `version`。凭证密文仅存在于该表，绝不覆盖更新。
 
-DNS 账户使用 `cloud_credential_id`，部署目标也使用该外键。首版要求单一 RAM 用户或角色同时具备所需 DNS/SSL/ALB 最小权限；生产部署应优先使用可轮换的 STS AssumeRole，而不是长期 AccessKey。凭证轮换创建新版本并原子切换 `current_version_id`；已排队任务引用精确的 `cloud_credential_version_id`，不会因为轮换而悄然改用新凭证。
+DNS 账户使用 `cloud_credential_id`，部署目标也使用该外键。首版要求单一 RAM 用户或角色同时具备所需 DNS/SSL/ALB 最小权限；生产部署应优先使用可轮换的 STS AssumeRole，而不是长期 AccessKey。AccessKey ID/Secret 创建后不可修改；更换凭证必须先解除所有关联、删除旧凭证，再创建新凭证，避免依赖资源悄然切换身份。
 
 ### 5.5 部署目标与关联
 
@@ -485,11 +496,11 @@ renew:<certificate_id>:<current_certificate_version_id>:<not_after_date>
 
 ```go
 type DNSProvider interface {
-    Provider() string
-    Validate(ctx context.Context, account DNSAccount) error
-    ResolveZone(ctx context.Context, account DNSAccount, fqdn string) (ZoneRef, error)
-    PresentTXT(ctx context.Context, account DNSAccount, fqdn, value string) (RecordRef, error)
-    CleanupTXT(ctx context.Context, account DNSAccount, ref RecordRef) error
+    Name() string
+    ListZones(ctx context.Context, credentials Credentials) ([]DNSZone, error)
+    VerifyDNSAccess(ctx context.Context, credentials Credentials, zone DNSZone) error
+    CreateDNSRecord(ctx context.Context, credentials Credentials, zone, name, recordType, value string, ttl int) error
+    DeleteDNSRecord(ctx context.Context, credentials Credentials, zone, name, recordType string) error
 }
 
 type CertificateDeployer interface {
@@ -499,7 +510,7 @@ type CertificateDeployer interface {
 }
 ```
 
-`ZoneRef` 必须包含根 Zone、相对记录名与权限验证结果；不能仅以字符串后缀猜测 Zone。`RecordRef` 必须保存提供者记录 ID、名称和值等足以精确删除本次记录的信息。`DeploymentResult` 包含远端证书 ID、监听器 ID、绑定模式、绑定状态、最终指纹和非敏感元数据。
+`DNSZone` 必须来自供应商实际返回的托管 Zone，不能仅以字符串后缀猜测。保存 DNS 账户前，`VerifyDNSAccess` 必须在每个 allowlist Zone 中创建并安全删除唯一临时 TXT；签发阶段仍由 `ResolveZone` 选择最具体的已授权 Zone。`RecordRef` 必须保存提供者记录 ID、名称和值等足以精确删除本次记录的信息。`DeploymentResult` 包含远端证书 ID、监听器 ID、绑定模式、绑定状态、最终指纹和非敏感元数据。
 
 ## 8. 任务队列、重试和锁
 
@@ -538,13 +549,21 @@ worker 定期续租。进程崩溃后，reaper 将过期 lease 的任务归还�
 | `POST` | `/api/v1/acme-accounts/{id}/verify` | 验证/注册 ACME 账户 |
 | `POST` / `GET` | `/api/v1/cloud-credentials` | 创建、查询云凭证逻辑资源 |
 | `GET` | `/api/v1/cloud-credentials/{id}/dns/zones` | 使用云凭证查询阿里云可管理 Zone，供 DNS 账户多选 allowlist |
-| `POST` | `/api/v1/cloud-credentials/{id}/rotate` | 创建新凭证版本并切换当前版本 |
 | `POST` | `/api/v1/cloud-credentials/{id}/verify` | 验证云凭证及所需最小权限 |
+| `POST` | `/api/v1/cloud-credentials/{id}/enable` | 实时验证后启用云凭证 |
+| `POST` | `/api/v1/cloud-credentials/{id}/disable` | 禁用云凭证并阻止后续外部操作 |
 | `POST` / `GET` | `/api/v1/dns-accounts` | 创建、查询 DNS 账户 |
+| `PATCH` | `/api/v1/dns-accounts/{id}` | 修改名称、说明、云凭证和 Zone allowlist，并重新执行权限验证 |
+| `DELETE` | `/api/v1/dns-accounts/{id}` | 无证书、域名验证或运行中任务引用时软删除 |
 | `POST` | `/api/v1/dns-accounts/{id}/verify` | 校验 DNS 凭证 |
+| `POST` | `/api/v1/dns-accounts/{id}/enable` / `disable` | 重新验证后启用，或禁用 DNS 账户 |
 | `POST` / `GET` | `/api/v1/certificates` | 创建、查询证书配置 |
 | `PATCH` / `DELETE` | `/api/v1/certificates/{id}` | 修改、禁用或删除证书配置 |
-| `POST` | `/api/v1/certificates/{id}/issue` | 创建首次签发任务 |
+| `POST` | `/api/v1/certificates/{id}/issue` | 以当前配置创建新的签发任务；签发成功后替换当前版本 |
+| `GET` | `/api/v1/events` | 建立用户级 SSE 状态流，支持 `Last-Event-ID` 断线补发 |
+| `GET` | `/api/v1/certificates/{id}/versions` | 查询不可变证书版本的安全元数据，不返回证书或私钥内容 |
+| `GET` | `/api/v1/certificates/{id}/relations` | 查询关联 ACME/DNS 账户、自动化任务与部署目标 |
+| `GET` | `/api/v1/certificates/{id}/manual-challenge/check` | 使用服务端 resolver 检查手动 DNS TXT 是否已解析；结果仅作传播辅助判断 |
 | `POST` | `/api/v1/certificates/{id}/renew` | 创建续期任务 |
 | `POST` | `/api/v1/certificates/{id}/revoke` | 撤销当前版本；需理由和强确认 |
 | `POST` / `GET` | `/api/v1/deployment-targets` | 创建、查询 ALB 部署目标 |
@@ -644,7 +663,7 @@ MVP 使用本地邮箱账户，角色只有 `admin` 和 `user`。管理员可查
 ## 13. MVP 交付顺序
 
 1. 单仓库骨架：Go `backend/`、Next.js `frontend/`、Docker Compose、配置加载、PostgreSQL 迁移、本地邮箱账户、RBAC 和 envelope encryption。
-2. `cloud_credentials`、ACME 账户、阿里云 DNS 账户的 CRUD、最小权限验证与凭证轮换。
+2. `cloud_credentials`、ACME 账户、阿里云 DNS 账户的 CRUD、真实凭证验证与启用/禁用；云凭证 AK/SK 不可修改。
 3. 证书配置、不可变证书版本、逐 SAN DNS/Zone 验证和 DNS-01 首次签发；支持多个 DNS-01 SAN 及多个一层通配符。
 4. PostgreSQL `jobs`、执行记录、outbox、锁、取消、重试与手动重试接口。
 5. 续期调度器与到期预警。
@@ -667,7 +686,7 @@ MVP 使用本地邮箱账户，角色只有 `admin` 和 `user`。管理员可查
 
 ## 15. 关键验收标准
 
-1. 管理员可创建、验证和轮换阿里云凭证，再创建 ACME 与阿里云 DNS 账户；API 不回显 secret。
+1. 管理员可创建、验证、启用和禁用阿里云凭证，再创建 ACME 与阿里云 DNS 账户；API 不回显 secret，AK/SK 不可修改。
 2. 操作员可通过 DNS-01 签发含通配符的 ECDSA 或 RSA 证书。
 3. 证书材料仅以密文存储；日志、执行记录和 API 响应中没有私钥或 AccessKey Secret。
 4. 自动续期在阈值内只创建一个有效任务，重复调度不会造成重复签发。

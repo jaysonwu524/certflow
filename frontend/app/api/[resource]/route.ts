@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { proxyAPI } from "@/lib/api-proxy";
-const resources = new Set(["cloud-credentials", "acme-accounts", "dns-accounts"]);
+const resources = new Set(["cloud-credentials", "acme-accounts", "dns-accounts", "deployment-targets"]);
 
 export async function GET(request: Request, { params }: { params: Promise<{ resource: string }> }) {
   const { resource } = await params;

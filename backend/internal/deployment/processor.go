@@ -3,14 +3,12 @@ package deployment
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/regenbio/certflow/internal/alb"
 	"github.com/regenbio/certflow/internal/aliyunrpc"
-	"github.com/regenbio/certflow/internal/cas"
+	"github.com/regenbio/certflow/internal/cloudprovider"
 	"github.com/regenbio/certflow/internal/cryptobox"
 	"github.com/regenbio/certflow/internal/job"
 	"github.com/regenbio/certflow/internal/store"
@@ -42,7 +40,23 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 		return err
 	}
 
-	var credentials aliyunrpc.Credentials
+	providerName := configuration.CloudCredential.Provider
+	if providerName == "" {
+		providerName = "aliyun"
+	}
+
+	// Get provider instance
+	provider, err := cloudprovider.Get(providerName)
+	if err != nil {
+		return job.Permanent("unsupported_provider", fmt.Sprintf("provider %s not supported", providerName))
+	}
+	uploader, supportsUpload := provider.(cloudprovider.CertificateUploadProvider)
+	loadBalancer, supportsLoadBalancer := provider.(cloudprovider.LoadBalancerProvider)
+	if !supportsUpload || !supportsLoadBalancer {
+		return job.Permanent("provider_capability_missing", "provider does not support certificate upload and load balancer operations")
+	}
+
+	var credentials cloudprovider.Credentials
 	var certificatePEM, privateKeyPEM, chainPEM []byte
 	if err := reporter.Step(ctx, "decrypt_deployment_material", nil, func(ctx context.Context) error {
 		if configuration.CloudCredential.Status != "active" {
@@ -65,33 +79,59 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 		if err != nil {
 			return job.Permanent("deployment_credential_unavailable", "could not decrypt deployment cloud credential")
 		}
-		if err := json.Unmarshal(payload, &credentials); err != nil || credentials.AccessKeyID == "" || credentials.AccessKeySecret == "" {
-			return job.Permanent("invalid_deployment_credential", "deployment cloud credential is invalid")
+
+		// Unmarshal credentials based on provider
+		credentials, err = cloudprovider.UnmarshalCredentials(providerName, payload)
+		if err != nil {
+			return job.Permanent("invalid_deployment_credential", fmt.Sprintf("deployment cloud credential is invalid: %v", err))
 		}
+		if err := provider.VerifyCredentials(ctx, credentials); err != nil {
+			return classify(err)
+		}
+
 		return nil
 	}); err != nil {
 		return p.fail(claimed, err)
 	}
 
 	remoteCertificateID := ""
-	if err := reporter.Step(ctx, "upload_aliyun_certificate", map[string]string{"target": configuration.TargetName}, func(ctx context.Context) error {
-		var err error
-		taskSuffix := "legacy"
-		if len(claimed.AutomationTaskID) >= 8 {
-			taskSuffix = claimed.AutomationTaskID[:8]
-		}
-		name := "certflow-" + configuration.CertificateID[:8] + "-" + taskSuffix
-		client := cas.New()
-		if configuration.RemoteCertificateID != "" && configuration.LastUploadedVersionID == configuration.CertificateVersionID {
-			remoteCertificateID = configuration.RemoteCertificateID
-		} else {
-			remoteCertificateID, err = client.UploadUserCertificate(ctx, cas.Credentials(credentials), name, string(append(certificatePEM, chainPEM...)), string(privateKeyPEM))
-		}
-		if err != nil {
-			return classify(err)
-		}
-		if remoteCertificateID == "" {
-			return job.Permanent("aliyun_certificate_upload_failed", "Aliyun Certificate Management did not return a certificate ID")
+	if err := reporter.Step(ctx, "upload_certificate", map[string]string{"target": configuration.TargetName}, func(ctx context.Context) error {
+		if err := p.store.WithCertificateCloudAssetLock(ctx, configuration.CertificateVersionID, configuration.CloudCredential.ID, func(ctx context.Context) error {
+			latest, err := p.store.LoadDeploymentConfiguration(ctx, claimed.AutomationTaskID, claimed.CertificateID, claimed.DeploymentTargetID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return job.Permanent("deployment_configuration_missing", "deployment target or certificate version is unavailable")
+			}
+			if err != nil {
+				return job.Retryable("deployment_configuration_load_failed", "could not reload deployment configuration", 0)
+			}
+			if latest.RemoteCertificateID != "" && latest.LastUploadedVersionID == configuration.CertificateVersionID {
+				remoteCertificateID = latest.RemoteCertificateID
+				return nil
+			}
+
+			taskSuffix := "legacy"
+			if len(claimed.AutomationTaskID) >= 8 {
+				taskSuffix = claimed.AutomationTaskID[:8]
+			}
+			name := "certflow-" + configuration.CertificateID[:8] + "-" + taskSuffix
+			remoteCertificateID, err = uploader.UploadCertificate(ctx, credentials, cloudprovider.UploadCertificateRequest{
+				Name:           name,
+				CertificatePEM: string(certificatePEM),
+				PrivateKeyPEM:  string(privateKeyPEM),
+				ChainPEM:       string(chainPEM),
+			})
+			if err != nil {
+				return classify(err)
+			}
+			if remoteCertificateID == "" {
+				return job.Permanent("certificate_upload_failed", "Certificate Management did not return a certificate ID")
+			}
+			if err := p.store.MarkCertificateCloudAsset(ctx, configuration.CertificateID, configuration.CertificateVersionID, configuration.CloudCredential.ID, remoteCertificateID); err != nil {
+				return job.Retryable("deployment_asset_state_save_failed", "certificate synchronized but cloud asset state could not be saved", 0)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 		if claimed.AutomationTaskID != "" {
 			if err := p.store.MarkAutomationRemoteCertificate(ctx, claimed.AutomationTaskID, claimed.DeploymentTargetID, configuration.CertificateVersionID, remoteCertificateID); err != nil {
@@ -103,13 +143,18 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 		return p.fail(claimed, err)
 	}
 
-	if err := reporter.Step(ctx, "update_alb_listener_certificate", map[string]string{"region_id": configuration.RegionID, "listener_id": configuration.ListenerID}, func(ctx context.Context) error {
-		return classify(alb.New().ReplaceDefaultCertificate(ctx, alb.Credentials(credentials), configuration.RegionID, configuration.ListenerID, remoteCertificateID))
+	if err := reporter.Step(ctx, "update_load_balancer_certificate", map[string]string{"region_id": configuration.RegionID, "listener_id": configuration.ListenerID}, func(ctx context.Context) error {
+		return classify(loadBalancer.UpdateListenerCertificate(ctx, credentials, cloudprovider.UpdateCertificateRequest{
+			RegionID:       configuration.RegionID,
+			LoadBalancerID: configuration.LoadBalancerID,
+			ListenerID:     configuration.ListenerID,
+			CertificateID:  remoteCertificateID,
+		}))
 	}); err != nil {
 		return p.fail(claimed, err)
 	}
 	if err := p.store.MarkDeploymentSucceeded(ctx, claimed.CertificateID, claimed.DeploymentTargetID, configuration.CertificateVersionID, remoteCertificateID); err != nil {
-		return job.Retryable("deployment_state_save_failed", "ALB was updated but deployment state could not be saved", 0)
+		return job.Retryable("deployment_state_save_failed", "load balancer was updated but deployment state could not be saved", 0)
 	}
 	return nil
 }

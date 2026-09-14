@@ -1,0 +1,287 @@
+"use client";
+
+import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+
+export type Locale = "zh-CN" | "en";
+
+export const messages = {
+  "nav.dashboard": { "zh-CN": "概览", en: "Overview" },
+  "nav.resources": { "zh-CN": "基础资源", en: "Resources" },
+  "nav.operations": { "zh-CN": "证书运维", en: "Certificate Operations" },
+  "nav.credentials": { "zh-CN": "云凭证", en: "Cloud Credentials" },
+  "nav.acme": { "zh-CN": "ACME 账户", en: "ACME Accounts" },
+  "nav.dns": { "zh-CN": "DNS 账户", en: "DNS Accounts" },
+  "nav.certificates": { "zh-CN": "证书", en: "Certificates" },
+  "nav.automations": { "zh-CN": "自动化", en: "Automations" },
+  "nav.executions": { "zh-CN": "执行记录", en: "Execution History" },
+  "nav.settings": { "zh-CN": "系统设置", en: "System Settings" },
+  "account.profile": { "zh-CN": "个人中心", en: "Profile" },
+  "account.logout": { "zh-CN": "退出登录", en: "Sign out" },
+  "account.admin": { "zh-CN": "管理员", en: "Administrator" },
+  "account.user": { "zh-CN": "用户", en: "User" },
+  "language.change": { "zh-CN": "切换语言", en: "Change language" },
+  "language.zh-CN": { "zh-CN": "简体中文", en: "Simplified Chinese" },
+  "language.en": { "zh-CN": "English", en: "English" },
+  "theme.change": { "zh-CN": "切换主题", en: "Change theme" },
+  "theme.light": { "zh-CN": "浅色", en: "Light" },
+  "theme.dark": { "zh-CN": "深色", en: "Dark" },
+  "theme.system": { "zh-CN": "跟随系统", en: "System" },
+  "auth.loginTitle": { "zh-CN": "登录控制台", en: "Sign in to the console" },
+  "auth.loginSubtitle": {
+    "zh-CN": "使用你的 CertFlow 账户继续。",
+    en: "Continue with your CertFlow account.",
+  },
+  "auth.registerTitle": { "zh-CN": "创建账户", en: "Create an account" },
+  "auth.registerSubtitle": {
+    "zh-CN": "验证邮箱后即可创建普通用户账户。",
+    en: "Verify your email to create a standard user account.",
+  },
+  "auth.email": { "zh-CN": "邮箱", en: "Email" },
+  "auth.emailPlaceholder": { "zh-CN": "you@example.com", en: "you@example.com" },
+  "auth.password": { "zh-CN": "密码", en: "Password" },
+  "auth.passwordPlaceholder": { "zh-CN": "输入密码", en: "Enter your password" },
+  "auth.confirmPassword": { "zh-CN": "确认密码", en: "Confirm password" },
+  "auth.code": { "zh-CN": "验证码", en: "Verification code" },
+  "auth.codePlaceholder": { "zh-CN": "输入 6 位验证码", en: "Enter the 6-digit code" },
+  "auth.passwordLogin": { "zh-CN": "密码登录", en: "Password" },
+  "auth.codeLogin": { "zh-CN": "验证码登录", en: "Email code" },
+  "auth.methodLabel": { "zh-CN": "登录方式", en: "Sign-in method" },
+  "auth.rememberMe": { "zh-CN": "记住我", en: "Remember me" },
+  "auth.rememberHint": {
+    "zh-CN": "在此设备保持登录 30 天",
+    en: "Stay signed in on this device for 30 days",
+  },
+  "auth.sendCode": { "zh-CN": "获取验证码", en: "Send code" },
+  "auth.retryCode": { "zh-CN": "秒后重试", en: "s to retry" },
+  "auth.login": { "zh-CN": "登录", en: "Sign in" },
+  "auth.loggingIn": { "zh-CN": "正在登录", en: "Signing in" },
+  "auth.register": { "zh-CN": "注册并登录", en: "Create account" },
+  "auth.registering": { "zh-CN": "正在创建", en: "Creating account" },
+  "auth.showPassword": { "zh-CN": "显示密码", en: "Show password" },
+  "auth.hidePassword": { "zh-CN": "隐藏密码", en: "Hide password" },
+  "auth.codeSent": {
+    "zh-CN": "验证码已发送，请查收邮箱。",
+    en: "The verification code was sent. Check your inbox.",
+  },
+  "auth.invalidEmail": { "zh-CN": "请输入有效的邮箱地址", en: "Enter a valid email address" },
+  "auth.invalidCode": { "zh-CN": "请输入 6 位验证码", en: "Enter the 6-digit verification code" },
+  "auth.invalidEmailForCode": {
+    "zh-CN": "请输入有效的邮箱地址后再获取验证码",
+    en: "Enter a valid email address before requesting a code",
+  },
+  "auth.passwordMismatch": { "zh-CN": "两次输入的密码不一致", en: "The passwords do not match" },
+  "auth.noAccount": { "zh-CN": "没有账户？", en: "No account?" },
+  "auth.registerLink": { "zh-CN": "邮箱注册", en: "Create one" },
+  "auth.hasAccount": { "zh-CN": "已有账户？", en: "Already have an account?" },
+  "auth.loginLink": { "zh-CN": "登录", en: "Sign in" },
+  "auth.requestFailed": { "zh-CN": "请求失败，请稍后重试", en: "Request failed. Try again." },
+  "auth.loginTimeout": { "zh-CN": "登录请求超时，请稍后重试", en: "Sign-in timed out. Try again." },
+  "auth.codeTimeout": {
+    "zh-CN": "验证码服务响应超时，请稍后重试",
+    en: "The code service timed out. Try again.",
+  },
+  "auth.registerTimeout": { "zh-CN": "注册请求超时，请稍后重试", en: "Registration timed out. Try again." },
+  "auth.loginFailed": { "zh-CN": "登录失败", en: "Sign-in failed" },
+  "auth.sendFailed": { "zh-CN": "发送失败", en: "Unable to send" },
+  "auth.registerFailed": { "zh-CN": "注册失败", en: "Registration failed" },
+  "auth.asideEyebrow": { "zh-CN": "证书生命周期管理", en: "CERTIFICATE LIFECYCLE MANAGEMENT" },
+  "auth.asideTitle": {
+    "zh-CN": "让每次证书变更，都有记录。",
+    en: "Keep every certificate change accounted for.",
+  },
+  "auth.asideBody": {
+    "zh-CN": "统一管理签发、验证、续期与部署，给运维团队一条清晰的工作路径。",
+    en: "A clear path for issuance, validation, renewal, and deployment.",
+  },
+  "auth.asideFooter": { "zh-CN": "安全访问 · 可追溯执行", en: "Secure access · Auditable execution" },
+  "profile.appearance": { "zh-CN": "外观偏好", en: "Appearance" },
+  "profile.appearanceDescription": {
+    "zh-CN": "选择控制台的颜色主题，设置会自动保存到当前浏览器。",
+    en: "Choose the console color theme. Your preference is saved in this browser.",
+  },
+  "profile.theme": { "zh-CN": "主题", en: "Theme" },
+  "profile.themeColor": { "zh-CN": "主题色", en: "Accent color" },
+  "profile.themeColorDescription": {
+    "zh-CN": "选择控制台的强调色，设置会自动保存到当前浏览器。",
+    en: "Choose the console accent color. Your preference is saved in this browser.",
+  },
+  "themeColor.teal": { "zh-CN": "青绿色", en: "Teal" },
+  "themeColor.blue": { "zh-CN": "科技蓝", en: "Cobalt" },
+  "themeColor.violet": { "zh-CN": "深紫色", en: "Violet" },
+  "themeColor.orange": { "zh-CN": "工程橙", en: "Orange" },
+  "section.dashboard": {
+    "zh-CN": "查看证书状态、部署情况与近期任务",
+    en: "Monitor certificate status, deployments, and recent tasks",
+  },
+  "section.credentials": {
+    "zh-CN": "管理云服务访问凭证与权限",
+    en: "Manage cloud access credentials and permissions",
+  },
+  "section.acme": { "zh-CN": "管理 ACME 签发账户与密钥", en: "Manage ACME issuer accounts and keys" },
+  "section.dns": {
+    "zh-CN": "管理 DNS 验证账户与可用 Zone",
+    en: "Manage DNS validation accounts and available zones",
+  },
+  "section.certificates": {
+    "zh-CN": "创建、签发、续期和验证 TLS 证书",
+    en: "Create, issue, renew, and validate TLS certificates",
+  },
+  "section.automations": {
+    "zh-CN": "配置续期、SSL 上传和 ALB 更新任务",
+    en: "Configure renewal, SSL upload, and ALB update tasks",
+  },
+  "section.executions": {
+    "zh-CN": "追踪签发、部署和通知任务的运行结果",
+    en: "Track issuance, deployment, and notification runs",
+  },
+  "section.settings": {
+    "zh-CN": "配置系统邮件服务与管理选项",
+    en: "Configure system email and administration options",
+  },
+  "section.profile": {
+    "zh-CN": "查看账户信息并维护登录安全",
+    en: "Review account details and sign-in security",
+  },
+  "common.name": { "zh-CN": "名称", en: "Name" },
+  "common.description": { "zh-CN": "描述", en: "Description" },
+  "common.status": { "zh-CN": "状态", en: "Status" },
+  "common.createdAt": { "zh-CN": "创建时间", en: "Created" },
+  "common.actions": { "zh-CN": "操作", en: "Actions" },
+  "common.search": { "zh-CN": "搜索", en: "Search" },
+  "common.noResults": { "zh-CN": "没有匹配的结果。", en: "No matching results." },
+  "common.verify": { "zh-CN": "验证", en: "Verify" },
+  "common.enable": { "zh-CN": "启用", en: "Enable" },
+  "common.disable": { "zh-CN": "禁用", en: "Disable" },
+  "common.refresh": { "zh-CN": "刷新", en: "Refresh" },
+  "common.retry": { "zh-CN": "重试", en: "Retry" },
+  "common.showing": { "zh-CN": "显示 {start}-{end} / 共 {total} 条", en: "Showing {start}-{end} of {total}" },
+  "common.perPage": { "zh-CN": "每页", en: "Per page" },
+  "common.pageSize": { "zh-CN": "每页显示数量", en: "Items per page" },
+  "common.items": { "zh-CN": "{count} 条", en: "{count} items" },
+  "common.previousPage": { "zh-CN": "上一页", en: "Previous page" },
+  "common.nextPage": { "zh-CN": "下一页", en: "Next page" },
+  "common.apiUnavailable": { "zh-CN": "CertFlow API 当前不可用，请启动后端后重试。", en: "The CertFlow API is unavailable. Start the backend and try again." },
+  "realtime.issue": { "zh-CN": "证书签发", en: "Certificate issuance" },
+  "realtime.renew": { "zh-CN": "证书续期", en: "Certificate renewal" },
+  "realtime.upload": { "zh-CN": "SSL 证书上传", en: "SSL certificate upload" },
+  "realtime.deploy": { "zh-CN": "证书部署", en: "Certificate deployment" },
+  "realtime.cloudCredentialVerify": { "zh-CN": "云凭证验证", en: "Cloud credential verification" },
+  "realtime.acmeVerify": { "zh-CN": "ACME 账户验证", en: "ACME account verification" },
+  "realtime.dnsVerify": { "zh-CN": "DNS 账户验证", en: "DNS account verification" },
+  "realtime.succeeded": { "zh-CN": "{operation}已完成", en: "{operation} completed" },
+  "realtime.failed": { "zh-CN": "{operation}失败", en: "{operation} failed" },
+  "realtime.waiting": { "zh-CN": "{operation}等待你的确认", en: "{operation} is waiting for your confirmation" },
+  "realtime.running": { "zh-CN": "{operation}正在执行", en: "{operation} is running" },
+  "notification.title": { "zh-CN": "站内信", en: "Notifications" },
+  "notification.unread": { "zh-CN": "{count} 条未读", en: "{count} unread" },
+  "notification.allRead": { "zh-CN": "全部已读", en: "All caught up" },
+  "notification.markAllRead": { "zh-CN": "全部标记已读", en: "Mark all read" },
+  "notification.loading": { "zh-CN": "正在加载站内信", en: "Loading notifications" },
+  "notification.empty": { "zh-CN": "暂时没有新通知", en: "No notifications yet" },
+  "notification.certificateUpdate": { "zh-CN": "证书状态已更新", en: "Certificate status updated" },
+  "notification.executionUpdate": { "zh-CN": "{operation}状态已更新", en: "{operation} status updated" },
+  "notification.verificationUpdate": { "zh-CN": "{operation}状态已更新", en: "{operation} status updated" },
+  "notification.detail": { "zh-CN": "通知详情", en: "Notification details" },
+  "notification.openCertificate": { "zh-CN": "前往证书详情", en: "Open certificate" },
+  "notification.openResource": { "zh-CN": "查看关联资源", en: "Open related resource" },
+  "notification.openExecutions": { "zh-CN": "查看执行记录", en: "View executions" },
+  "notification.resource": { "zh-CN": "关联资源", en: "Related resource" },
+  "notification.executionResource": { "zh-CN": "执行记录", en: "Execution record" },
+  "notification.status.pending": { "zh-CN": "等待签发", en: "Pending issuance" },
+  "notification.status.issuing": { "zh-CN": "正在签发", en: "Issuing" },
+  "notification.status.renewing": { "zh-CN": "正在续期", en: "Renewing" },
+  "notification.status.issued": { "zh-CN": "已签发", en: "Issued" },
+  "notification.status.succeeded": { "zh-CN": "执行成功", en: "Succeeded" },
+  "notification.status.failed": { "zh-CN": "执行失败", en: "Failed" },
+  "notification.status.waiting": { "zh-CN": "等待你的确认", en: "Waiting for your confirmation" },
+  "notification.status.running": { "zh-CN": "正在验证", en: "Verifying" },
+  "dns.create": { "zh-CN": "新建 DNS 账户", en: "Create DNS account" },
+  "dns.edit": { "zh-CN": "编辑 DNS 账户", en: "Edit DNS account" },
+  "dns.tableLabel": { "zh-CN": "DNS 账户", en: "DNS accounts" },
+  "dns.credential": { "zh-CN": "云凭证", en: "Cloud credential" },
+  "dns.allowedZones": { "zh-CN": "授权 Zone", en: "Allowed zones" },
+  "dns.lastVerified": { "zh-CN": "最近验证", en: "Last verified" },
+  "dns.notVerified": { "zh-CN": "未验证", en: "Not verified" },
+  "dns.empty": { "zh-CN": "尚未配置 DNS 账户。", en: "No DNS accounts configured." },
+  "dns.searchPlaceholder": { "zh-CN": "搜索名称、Zone 或凭证", en: "Search name, zone, or credential" },
+  "dns.formDescription": { "zh-CN": "DNS 账户使用已有云凭证访问 DNS API，只允许在选中的 Zone 中创建验证记录。保存前会执行一次临时 TXT 写入与删除检查。", en: "A DNS account uses an existing cloud credential and is restricted to the selected zones. Saving performs a temporary TXT write/delete check." },
+  "dns.descriptionPlaceholder": { "zh-CN": "可选，例如：生产环境 DNS 验证", en: "Optional, for example: production DNS validation" },
+  "dns.noCredential": { "zh-CN": "请先配置并验证可用的云凭证。", en: "Configure and verify an available cloud credential first." },
+  "dns.loadingZones": { "zh-CN": "正在从云平台获取 Zone...", en: "Loading zones from the provider..." },
+  "dns.loadZonesFailed": { "zh-CN": "无法获取可管理的 Zone", en: "Unable to load managed zones" },
+  "dns.selectCredential": { "zh-CN": "云凭证", en: "Cloud credential" },
+  "dns.selectCredentialHint": { "zh-CN": "先选择云凭证，再加载该凭证可管理的 Zone。", en: "Select a cloud credential to load its managed zones." },
+  "dns.noZones": { "zh-CN": "没有可选 Zone，请确认凭证拥有域名读取权限。", en: "No zones are available. Check the credential's DNS read permission." },
+  "dns.searchZone": { "zh-CN": "搜索 Zone", en: "Search zones" },
+  "dns.selectAll": { "zh-CN": "全选", en: "Select all" },
+  "dns.clearSelection": { "zh-CN": "清除选择", en: "Clear" },
+  "dns.zoneHint": { "zh-CN": "仅在选中的 Zone 中创建 DNS-01 TXT 记录", en: "DNS-01 TXT records are created only in selected zones" },
+  "dns.zoneOverlap": { "zh-CN": "检测到 Zone 有包含关系，签发时会优先使用更具体的 Zone。", en: "Some zones overlap; issuance will use the most specific zone." },
+  "dns.selectedCount": { "zh-CN": "已选 {count} 个", en: "{count} selected" },
+  "dns.verifying": { "zh-CN": "验证中", en: "Verifying" },
+  "dns.verifyFailed": { "zh-CN": "DNS 账户验证失败", en: "DNS account verification failed" },
+  "dns.statusUpdateFailed": { "zh-CN": "无法更新 DNS 账户状态", en: "Unable to update DNS account status" },
+  "dns.saveFailed": { "zh-CN": "无法保存 DNS 账户", en: "Unable to save DNS account" },
+  "dns.namePlaceholder": { "zh-CN": "例如：生产 DNS 验证账户", en: "For example: production DNS validation" },
+  "dns.unconfigured": { "zh-CN": "未配置", en: "Not configured" },
+  "dns.details": { "zh-CN": "详情", en: "Details" },
+  "dns.editAction": { "zh-CN": "编辑", en: "Edit" },
+  "dns.deleteAction": { "zh-CN": "删除", en: "Delete" },
+  "dns.nameRequired": { "zh-CN": "请输入 DNS 账户名称", en: "Enter a DNS account name" },
+  "dns.credentialRequired": { "zh-CN": "请选择云凭证", en: "Select a cloud credential" },
+  "dns.zoneRequired": { "zh-CN": "请选择至少一个可管理的 Zone", en: "Select at least one managed zone" },
+  "dns.deleteFailed": { "zh-CN": "无法删除 DNS 账户", en: "Unable to delete DNS account" },
+  "dns.deleteTitle": { "zh-CN": "删除 DNS 账户", en: "Delete DNS account" },
+  "dns.deleteDescription": { "zh-CN": "将删除“{name}”。此操作无法撤销。", en: "“{name}” will be deleted. This action cannot be undone." },
+  "dns.deleteHint": { "zh-CN": "若账户仍被证书、域名验证或运行中的任务引用，系统会阻止删除。", en: "Deletion is blocked while certificates, domain validations, or running jobs reference this account." },
+  "dns.detailTitle": { "zh-CN": "DNS 账户详情", en: "DNS account details" },
+  "dns.detailDescription": { "zh-CN": "查看 DNS 账户的云凭证和 Zone 授权范围。", en: "Review the cloud credential and zone access for this DNS account." },
+  "dns.provider": { "zh-CN": "云平台", en: "Provider" },
+  "dns.lastError": { "zh-CN": "最近错误", en: "Last error" },
+  "dns.save": { "zh-CN": "保存", en: "Save" },
+  "dns.saving": { "zh-CN": "正在保存", en: "Saving" },
+  "dns.cancel": { "zh-CN": "取消", en: "Cancel" },
+  "dns.close": { "zh-CN": "关闭", en: "Close" },
+  "dns.confirmDelete": { "zh-CN": "确认删除", en: "Delete" },
+  "dns.deleting": { "zh-CN": "正在删除", en: "Deleting" },
+} as const;
+
+export type TranslationKey = keyof typeof messages;
+
+type LocaleContextValue = {
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  t: (key: TranslationKey) => string;
+};
+
+const LocaleContext = createContext<LocaleContextValue | null>(null);
+
+export function LocaleProvider({ children, initialLocale }: { children: ReactNode; initialLocale: Locale }) {
+  const router = useRouter();
+  const [locale, setCurrentLocale] = useState(initialLocale);
+
+  const value = useMemo<LocaleContextValue>(
+    () => ({
+      locale,
+      setLocale(nextLocale) {
+        if (nextLocale === locale) return;
+        document.cookie = `certflow_locale=${nextLocale}; Path=/; Max-Age=31536000; SameSite=Lax`;
+        setCurrentLocale(nextLocale);
+        router.refresh();
+      },
+      t(key) {
+        return messages[key][locale];
+      },
+    }),
+    [locale, router],
+  );
+
+  return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;
+}
+
+export function useLocale() {
+  const context = useContext(LocaleContext);
+  if (!context) throw new Error("useLocale must be used within LocaleProvider");
+  return context;
+}

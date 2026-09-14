@@ -14,13 +14,18 @@ import (
 	"github.com/regenbio/certflow/internal/store"
 )
 
-const sessionCookieName = "certflow_session"
+const (
+	accessCookieName  = "certflow_session"
+	refreshCookieName = "certflow_refresh"
+	refreshTokenTTL   = 30 * 24 * time.Hour
+)
 
 type authContextKey struct{}
 type authRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Code     string `json:"code"`
+	Email      string `json:"email"`
+	Password   string `json:"password"`
+	Code       string `json:"code"`
+	RememberMe bool   `json:"rememberMe"`
 }
 type changePasswordRequest struct {
 	CurrentPassword string `json:"currentPassword"`
@@ -40,7 +45,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 }
 
 func (s *Server) currentUser(r *http.Request) (store.User, error) {
-	cookie, err := r.Cookie(sessionCookieName)
+	cookie, err := r.Cookie(accessCookieName)
 	if err != nil || cookie.Value == "" {
 		return store.User{}, pgx.ErrNoRows
 	}
@@ -97,7 +102,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "registration_failed", "this email is already registered")
 		return
 	}
-	s.createLoginSession(w, r, user)
+	s.createLoginSession(w, r, user, false)
 }
 
 func (s *Server) requestLoginCode(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +131,7 @@ func (s *Server) loginPassword(w http.ResponseWriter, r *http.Request) {
 		s.writeLoginError(w, err)
 		return
 	}
-	s.createLoginSession(w, r, user)
+	s.createLoginSession(w, r, user, input.RememberMe)
 }
 func (s *Server) loginCode(w http.ResponseWriter, r *http.Request) {
 	var input authRequest
@@ -142,7 +147,7 @@ func (s *Server) loginCode(w http.ResponseWriter, r *http.Request) {
 		s.writeLoginError(w, err)
 		return
 	}
-	s.createLoginSession(w, r, user)
+	s.createLoginSession(w, r, user, input.RememberMe)
 }
 
 func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
@@ -154,10 +159,14 @@ func (s *Server) authMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, user)
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+	if cookie, err := r.Cookie(accessCookieName); err == nil {
 		_ = s.store.RevokeSession(r.Context(), cookie.Value)
 	}
+	if cookie, err := r.Cookie(refreshCookieName); err == nil {
+		_ = s.store.RevokeRefreshToken(r.Context(), cookie.Value)
+	}
 	s.clearSessionCookie(w)
+	s.clearRefreshCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
@@ -181,17 +190,70 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) createLoginSession(w http.ResponseWriter, r *http.Request, user store.User) {
+func (s *Server) createLoginSession(w http.ResponseWriter, r *http.Request, user store.User, rememberMe bool) {
 	session, err := s.store.CreateSession(r.Context(), user, s.sessionTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_create_failed", "could not create a session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: session.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, Expires: session.ExpiresAt, MaxAge: int(s.sessionTTL.Seconds())})
+	accessCookie := &http.Cookie{Name: accessCookieName, Value: session.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil}
+	if rememberMe {
+		accessCookie.Expires = session.ExpiresAt
+		accessCookie.MaxAge = int(s.sessionTTL.Seconds())
+	}
+	http.SetCookie(w, accessCookie)
+	refresh, err := s.store.CreateRefreshToken(r.Context(), user, refreshTokenTTL, rememberMe)
+	if err != nil {
+		_ = s.store.RevokeSession(r.Context(), session.Token)
+		clearCookie(w, accessCookieName)
+		writeError(w, http.StatusInternalServerError, "refresh_token_create_failed", "could not create a refresh token")
+		return
+	}
+	s.setRefreshCookie(w, r, refresh)
 	writeJSON(w, http.StatusOK, user)
 }
 func (s *Server) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+	clearCookie(w, accessCookieName)
+}
+
+func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(refreshCookieName)
+	if err != nil || cookie.Value == "" {
+		s.clearSessionCookie(w)
+		s.clearRefreshCookie(w)
+		writeError(w, http.StatusUnauthorized, "refresh_token_missing", "refresh token is missing or expired")
+		return
+	}
+	refresh, err := s.store.RotateRefreshToken(r.Context(), cookie.Value, refreshTokenTTL)
+	if err != nil {
+		s.clearSessionCookie(w)
+		s.clearRefreshCookie(w)
+		writeError(w, http.StatusUnauthorized, "refresh_token_invalid", "refresh token is invalid or expired")
+		return
+	}
+	access, err := s.store.CreateSession(r.Context(), refresh.User, s.sessionTTL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_create_failed", "could not create a session")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: accessCookieName, Value: access.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, Expires: access.ExpiresAt, MaxAge: int(s.sessionTTL.Seconds())})
+	s.setRefreshCookie(w, r, refresh)
+	writeJSON(w, http.StatusOK, refresh.User)
+}
+
+func (s *Server) setRefreshCookie(w http.ResponseWriter, r *http.Request, session store.RefreshSession) {
+	cookie := &http.Cookie{Name: refreshCookieName, Value: session.Token, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil}
+	if session.Persistent {
+		cookie.Expires = session.ExpiresAt
+		cookie.MaxAge = int(time.Until(session.ExpiresAt).Seconds())
+	}
+	http.SetCookie(w, cookie)
+}
+
+func (s *Server) clearRefreshCookie(w http.ResponseWriter) { clearCookie(w, refreshCookieName) }
+
+func clearCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
 }
 
 func (s *Server) sendVerificationCode(ctx context.Context, email, purpose string) error {
@@ -238,6 +300,10 @@ func (s *Server) loadSMTPSettings(ctx context.Context) (store.SMTPSettings, erro
 var errSMTPNotConfigured = errors.New("smtp is not configured")
 
 func (s *Server) writeMailError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrVerificationRateLimited) {
+		writeError(w, http.StatusTooManyRequests, "verification_rate_limited", "please wait one minute before requesting another code")
+		return
+	}
 	if errors.Is(err, errSMTPNotConfigured) {
 		writeError(w, http.StatusServiceUnavailable, "smtp_not_configured", "email service has not been configured by an administrator")
 		return

@@ -19,6 +19,49 @@ export type Certificate = {
   createdAt: string;
 };
 
+export type CertificateVersion = {
+  id: string;
+  serialNumber: string;
+  fingerprint: string;
+  notBefore: string;
+  notAfter: string;
+  issuedAt: string;
+  revokedAt: string | null;
+  revocationReason: string;
+  isCurrent: boolean;
+};
+
+export type CertificateResourceReference = {
+  id: string;
+  name: string;
+  status: string;
+};
+
+export type CertificateAutomationReference = {
+  id: string;
+  name: string;
+  actionType: "renew_certificate" | "upload_ssl" | "deploy_alb";
+  enabled: boolean;
+  lastStatus: string;
+};
+
+export type CertificateDeploymentReference = {
+  id: string;
+  targetId: string;
+  targetName: string;
+  enabled: boolean;
+  autoDeploy: boolean;
+  lastDeployedAt: string | null;
+  lastError: string;
+};
+
+export type CertificateRelations = {
+  acmeAccount: CertificateResourceReference | null;
+  dnsAccount: CertificateResourceReference | null;
+  automations: CertificateAutomationReference[];
+  deployments: CertificateDeploymentReference[];
+};
+
 export type Execution = {
   id: string;
   kind: string;
@@ -34,10 +77,13 @@ export type Execution = {
 export type CloudCredential = {
   id: string;
   name: string;
+  description: string;
   provider: string;
+  accessKeyId: string;
   credentialHint: string;
   status: string;
   lastVerifiedAt: string | null;
+  lastError: string;
   createdAt: string;
 };
 
@@ -45,19 +91,28 @@ export type ACMEAccount = {
   id: string;
   name: string;
   directoryUrl: string;
+  accountUrl: string;
   email: string;
+  privateKeyAlgorithm: string;
   status: string;
+  lastVerifiedAt: string | null;
+  lastError: string;
+  certificateCount: number;
+  automationCount: number;
   createdAt: string;
 };
 
 export type DNSAccount = {
   id: string;
   name: string;
+  description: string;
   provider: string;
   cloudCredentialId: string;
   allowedZones: string[];
   status: string;
   lastVerifiedAt: string | null;
+  lastError: string;
+  verifiedCredentialVersionId: string;
   createdAt: string;
 };
 
@@ -97,6 +152,24 @@ export type AutomationTask = {
   lastStatus: string;
   lastError: string;
   targetCount: number;
+  cloudCredentialId: string;
+  targetIds: string[];
+  createdAt: string;
+};
+
+export type AutomationRun = {
+  id: string;
+  automationTaskId: string;
+  certificateId: string;
+  certificateVersionId: string;
+  triggerType: "manual" | "scheduler" | "certificate_issued";
+  status: string;
+  totalJobs: number;
+  succeededJobs: number;
+  failedJobs: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lastError: string;
   createdAt: string;
 };
 
@@ -109,7 +182,10 @@ const apiBaseUrl = process.env.CERTFLOW_API_URL ?? "http://localhost:8080";
 async function apiGet<T>(path: string, fallback: T): Promise<{ data: T; unavailable: boolean }> {
   try {
     const cookie = (await cookies()).toString();
-    const response = await fetch(`${apiBaseUrl}/api/v1${path}`, { cache: "no-store", headers: cookie ? { cookie } : {} });
+    const response = await fetch(`${apiBaseUrl}/api/v1${path}`, {
+      cache: "no-store",
+      headers: cookie ? { cookie } : {},
+    });
     if (!response.ok) {
       return { data: fallback, unavailable: true };
     }

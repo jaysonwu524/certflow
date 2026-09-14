@@ -1,3 +1,6 @@
+import { Tag, TagGroup } from "@heroui/react";
+import { useId } from "react";
+
 const labels: Record<string, string> = {
   draft: "草稿",
   pending: "待签发",
@@ -11,11 +14,24 @@ const labels: Record<string, string> = {
   disabled: "已禁用",
   queued: "排队中",
   running: "执行中",
-	waiting_user: "等待确认",
+  waiting_user: "等待确认",
   succeeded: "成功",
   cancelled: "已取消",
+  active: "正常",
+  invalid: "验证失败",
 };
 
 export function StatusTag({ status }: { status: string }) {
-  return <span className={`status-tag status-${status}`}>{labels[status] ?? status}</span>;
+  const label = labels[status] ?? status;
+  const tagId = useId();
+
+  return (
+    <TagGroup aria-label="状态" className="status-tag-group" size="sm" variant="default">
+      <TagGroup.List>
+        <Tag id={tagId} className={`status-tag status-${status}`}>
+          {label}
+        </Tag>
+      </TagGroup.List>
+    </TagGroup>
+  );
 }
