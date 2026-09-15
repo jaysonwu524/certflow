@@ -107,7 +107,7 @@ jobs:
         go build -v -o dbinit ./cmd/dbinit
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: control-plane-binaries
         path: |
