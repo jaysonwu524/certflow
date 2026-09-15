@@ -390,13 +390,18 @@ func (s *Server) createACMEAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Account keys are supplied explicitly so operators retain control of the
-	// ACME account identity. The key is encrypted immediately and never echoed.
-	if strings.TrimSpace(input.PrivateKey) == "" {
-		writeError(w, http.StatusUnprocessableEntity, "acme_private_key_required", "ACME account private key PEM is required")
-		return
-	}
+	// Generate a key for a new account unless the operator is importing an
+	// existing ACME identity. In both cases it is encrypted immediately and
+	// never returned by the API.
 	input.PrivateKey = strings.TrimSpace(input.PrivateKey)
+	if input.PrivateKey == "" {
+		generatedKey, generateErr := generateACMEPrivateKey(input.PrivateKeyAlgorithm)
+		if generateErr != nil {
+			writeError(w, http.StatusInternalServerError, "acme_key_generation_failed", "could not generate ACME account key")
+			return
+		}
+		input.PrivateKey = string(generatedKey)
+	}
 	accountURL, err := verifyACMEAccountKey(r.Context(), input.DirectoryURL, input.Email, input.PrivateKey, "")
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "acme_account_verification_failed", sanitizeACMEError(err))

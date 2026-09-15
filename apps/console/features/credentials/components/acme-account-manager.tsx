@@ -96,11 +96,6 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
       setError("请输入联系邮箱");
       return;
     }
-    if (!isEditing && !draft.privateKey.trim()) {
-      setError("请输入账户私钥 PEM");
-      return;
-    }
-
     setPending(true);
     setError("");
     const payload = {
@@ -328,7 +323,7 @@ function ACMEAccountFormModal({
               <p className="mt-1.5 text-sm leading-5 text-muted">
                 {editing
                   ? "账户私钥不会回显；填写新的 PEM 可轮换账户密钥。"
-                  : "账户私钥会加密保存，之后不会再以明文显示。"}
+                  : "默认由 CertFlow 生成并加密保存账户私钥；如需导入已有 ACME 账户，可粘贴其 PEM。"}
               </p>
             </Modal.Header>
             <Modal.Body className="p-6">
@@ -380,17 +375,16 @@ function ACMEAccountFormModal({
                       </Select.Popover>
                     </Select>
                   </div>
-                  <TextField className="w-full" name="privateKey" type="text" isRequired={!editing}>
-                    <Label>账户私钥 PEM{editing ? "（可选）" : ""}</Label>
+                  <TextField className="w-full" name="privateKey" type="text">
+                    <Label>账户私钥 PEM（可选）</Label>
                     <TextArea
-                      placeholder={editing ? "留空表示保留当前账户私钥" : "粘贴 ACME 账户私钥 PEM"}
+                      placeholder={editing ? "留空表示保留当前账户私钥" : "留空由 CertFlow 自动生成；或粘贴已有 ACME 账户私钥 PEM"}
                       autoComplete="off"
                       rows={7}
                     />
                   </TextField>
                   <p className="field-help">
-                    私钥只用于 ACME 账户认证，创建或轮换后不会回显。创建时必须填写
-                    PEM；编辑时留空即可保留现有私钥。
+                    私钥只用于 ACME 账户认证，创建或轮换后不会回显。新建时留空会按所选算法自动生成；编辑时留空会保留现有私钥。
                   </p>
                   {error ? (
                     <div className="form-error" role="alert">
