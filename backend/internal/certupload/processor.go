@@ -111,8 +111,19 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 				return job.Retryable("upload_configuration_load_failed", "could not reload upload configuration", 0)
 			}
 			if latest.RemoteCertificateID != "" && latest.LastUploadedVersionID == configuration.CertificateVersionID {
-				remoteID = latest.RemoteCertificateID
-				return nil
+				if lookup, ok := provider.(cloudprovider.CertificateLookupProvider); ok {
+					exists, lookupErr := lookup.CertificateExists(ctx, credentials, latest.RemoteCertificateID)
+					if lookupErr != nil {
+						return classify(lookupErr)
+					}
+					if exists {
+						remoteID = latest.RemoteCertificateID
+						return nil
+					}
+				} else {
+					remoteID = latest.RemoteCertificateID
+					return nil
+				}
 			}
 
 			taskSuffix := "legacy"

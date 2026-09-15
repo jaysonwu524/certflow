@@ -272,5 +272,8 @@ type CreateAutomationTaskInput struct {
 	IntervalMinutes     int      `json:"intervalMinutes"`
 	CloudCredentialID   string   `json:"cloudCredentialId"`
 	DeploymentTargetIDs []string `json:"deploymentTargetIds"`
-	Enabled             bool     `json:"enabled"`
+	// InlineDeploymentTarget lets the ALB automation form create or reuse a
+	// listener target without requiring an operator to leave the task flow.
+	InlineDeploymentTarget *CreateDeploymentTargetInput `json:"inlineDeploymentTarget,omitempty"`
+	Enabled                bool                         `json:"enabled"`
 }

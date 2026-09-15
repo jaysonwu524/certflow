@@ -45,7 +45,7 @@ export function RealtimeEvents() {
   const refreshTimer = useRef<number | null>(null);
 
   useEffect(() => {
-    if (pathname === "/login" || pathname === "/register") return;
+    if (pathname === "/" || pathname === "/login" || pathname === "/register") return;
     let cursor = "";
     try {
       cursor = window.localStorage.getItem(cursorStorageKey) ?? "";

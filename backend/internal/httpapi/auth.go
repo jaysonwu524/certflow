@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -28,8 +29,9 @@ type authRequest struct {
 	RememberMe bool   `json:"rememberMe"`
 }
 type changePasswordRequest struct {
-	CurrentPassword string `json:"currentPassword"`
-	NewPassword     string `json:"newPassword"`
+	CurrentPassword     string `json:"currentPassword"`
+	NewPassword         string `json:"newPassword"`
+	RevokeOtherSessions *bool  `json:"revokeOtherSessions"`
 }
 
 func (s *Server) requireAuth(next http.Handler) http.Handler {
@@ -179,19 +181,61 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &input) {
 		return
 	}
+	actorContext := store.WithActor(r.Context(), store.Actor{ID: user.ID, Email: user.Email, Role: user.Role})
 	if err := validatePassword(input.NewPassword); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_password", err.Error())
 		return
 	}
-	if err := s.store.ChangePassword(r.Context(), user.ID, input.CurrentPassword, input.NewPassword, true); err != nil {
+	if err := s.store.ChangePassword(actorContext, user.ID, input.CurrentPassword, input.NewPassword, true); err != nil {
 		s.writeLoginError(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	revokeOthers := input.RevokeOtherSessions == nil || *input.RevokeOtherSessions
+	revoked := int64(0)
+	if revokeOthers {
+		accessToken, _ := requestCookieValue(r, accessCookieName)
+		refreshToken, _ := requestCookieValue(r, refreshCookieName)
+		var err error
+		revoked, err = s.store.RevokeOtherUserSessions(actorContext, accessToken, refreshToken)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "session_revoke_failed", "password was changed but other sessions could not be revoked")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revokedSessions": revoked})
+}
+
+func (s *Server) listProfileSessions(w http.ResponseWriter, r *http.Request) {
+	currentToken, err := requestCookieValue(r, accessCookieName)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication_required", "please sign in to continue")
+		return
+	}
+	sessions, err := s.store.ListUserSessions(r.Context(), currentToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_list_failed", "could not load signed-in sessions")
+		return
+	}
+	writeJSON(w, http.StatusOK, sessions)
+}
+
+func (s *Server) revokeOtherProfileSessions(w http.ResponseWriter, r *http.Request) {
+	currentAccess, err := requestCookieValue(r, accessCookieName)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "authentication_required", "please sign in to continue")
+		return
+	}
+	currentRefresh, _ := requestCookieValue(r, refreshCookieName)
+	revoked, err := s.store.RevokeOtherUserSessions(r.Context(), currentAccess, currentRefresh)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_revoke_failed", "could not revoke other sessions")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revokedSessions": revoked})
 }
 
 func (s *Server) createLoginSession(w http.ResponseWriter, r *http.Request, user store.User, rememberMe bool) {
-	session, err := s.store.CreateSession(r.Context(), user, s.sessionTTL)
+	session, err := s.store.CreateSession(r.Context(), user, s.sessionTTL, sessionDeviceLabel(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_create_failed", "could not create a session")
 		return
@@ -231,7 +275,7 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "refresh_token_invalid", "refresh token is invalid or expired")
 		return
 	}
-	access, err := s.store.CreateSession(r.Context(), refresh.User, s.sessionTTL)
+	access, err := s.store.CreateSession(r.Context(), refresh.User, s.sessionTTL, sessionDeviceLabel(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "session_create_failed", "could not create a session")
 		return
@@ -254,6 +298,30 @@ func (s *Server) clearRefreshCookie(w http.ResponseWriter) { clearCookie(w, refr
 
 func clearCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+}
+
+func requestCookieValue(r *http.Request, name string) (string, error) {
+	cookie, err := r.Cookie(name)
+	if err != nil || cookie.Value == "" {
+		return "", pgx.ErrNoRows
+	}
+	return cookie.Value, nil
+}
+
+func sessionDeviceLabel(r *http.Request) string {
+	userAgent := r.UserAgent()
+	switch {
+	case strings.Contains(userAgent, "Edg/"):
+		return "Microsoft Edge"
+	case strings.Contains(userAgent, "Firefox/"):
+		return "Firefox"
+	case strings.Contains(userAgent, "Chrome/"):
+		return "Chrome"
+	case strings.Contains(userAgent, "Safari/"):
+		return "Safari"
+	default:
+		return "Web browser"
+	}
 }
 
 func (s *Server) sendVerificationCode(ctx context.Context, email, purpose string) error {

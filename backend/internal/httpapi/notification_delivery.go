@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -23,13 +25,34 @@ type personalWebhookRequest struct {
 	URL     string `json:"url"`
 }
 
+type personalWebhookResponse struct {
+	Enabled            bool       `json:"enabled"`
+	URL                string     `json:"url"`
+	EmailConfigured    bool       `json:"emailConfigured"`
+	LastDeliveryStatus string     `json:"lastDeliveryStatus"`
+	LastDeliveryAt     *time.Time `json:"lastDeliveryAt"`
+	LastDeliveryError  string     `json:"lastDeliveryError"`
+}
+
+type personalWebhookTestRequest struct {
+	URL string `json:"url"`
+}
+
 func (s *Server) getPersonalWebhook(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.store.GetPersonalWebhookSettings(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "webhook_settings_unavailable", "could not load webhook settings")
 		return
 	}
-	result := personalWebhookRequest{Enabled: settings.Enabled}
+	result := personalWebhookResponse{
+		Enabled:            settings.Enabled,
+		LastDeliveryStatus: settings.LastDeliveryStatus,
+		LastDeliveryAt:     settings.LastDeliveryAt,
+		LastDeliveryError:  settings.LastDeliveryError,
+	}
+	if _, err := s.loadSMTPSettings(r.Context()); err == nil {
+		result.EmailConfigured = true
+	}
 	if settings.EndpointID != "" {
 		value, err := s.box.Open("notification_endpoint", personalWebhookKey(actor(r).ID), settings.URLCiphertext)
 		if err != nil {
@@ -54,7 +77,7 @@ func (s *Server) updatePersonalWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	ciphertext := settings.URLCiphertext
 	if input.URL != "" {
-		if err := validateWebhookURL(input.URL); err != nil {
+		if err := validateWebhookURL(r.Context(), input.URL); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, "invalid_webhook_url", err.Error())
 			return
 		}
@@ -76,19 +99,28 @@ func (s *Server) updatePersonalWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) testPersonalWebhook(w http.ResponseWriter, r *http.Request) {
+	var input personalWebhookTestRequest
+	if !decodeBody(w, r, &input) {
+		return
+	}
+	input.URL = strings.TrimSpace(input.URL)
 	settings, err := s.store.GetPersonalWebhookSettings(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "webhook_settings_unavailable", "could not load webhook settings")
 		return
 	}
-	if !settings.Enabled || settings.EndpointID == "" {
-		writeError(w, http.StatusUnprocessableEntity, "webhook_not_configured", "enable and save a webhook before sending a test")
-		return
-	}
-	webhookURL, err := s.box.Open("notification_endpoint", personalWebhookKey(actor(r).ID), settings.URLCiphertext)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "webhook_settings_unavailable", "could not load webhook settings")
-		return
+	target := input.URL
+	if target == "" {
+		if !settings.Enabled || settings.EndpointID == "" {
+			writeError(w, http.StatusUnprocessableEntity, "webhook_not_configured", "provide a webhook URL or enable and save one before sending a test")
+			return
+		}
+		webhookURL, err := s.box.Open("notification_endpoint", personalWebhookKey(actor(r).ID), settings.URLCiphertext)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "webhook_settings_unavailable", "could not load webhook settings")
+			return
+		}
+		target = string(webhookURL)
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
@@ -101,7 +133,7 @@ func (s *Server) testPersonalWebhook(w http.ResponseWriter, r *http.Request) {
 		Payload:      map[string]any{"message": "CertFlow webhook test"},
 		CreatedAt:    time.Now().UTC(),
 	}
-	if err := postWebhook(ctx, string(webhookURL), event); err != nil {
+	if err := postWebhook(ctx, target, event); err != nil {
 		writeError(w, http.StatusBadGateway, "webhook_delivery_failed", "could not deliver the webhook test")
 		return
 	}
@@ -169,16 +201,91 @@ func (s *Server) deliverNotification(parent context.Context, delivery store.Clai
 	}
 }
 
-func validateWebhookURL(value string) error {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+func validateWebhookURL(ctx context.Context, value string) error {
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Hostname() == "" {
 		return errors.New("webhook URL must be a valid HTTPS URL")
+	}
+	if port := parsed.Port(); port != "" && port != "443" {
+		return errors.New("webhook URL must use HTTPS port 443")
+	}
+	if net.ParseIP(parsed.Hostname()) != nil {
+		return errors.New("webhook URL must use a public hostname")
+	}
+	return validateWebhookHost(ctx, parsed.Hostname())
+}
+
+// validateWebhookHost 与实际拨号使用相同的公网地址约束，避免 Webhook 被用作内网探测入口。
+func validateWebhookHost(ctx context.Context, hostname string) error {
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+	if err != nil || len(addresses) == 0 {
+		return errors.New("webhook hostname could not be resolved")
+	}
+	for _, address := range addresses {
+		if !isPublicWebhookIP(address.IP) {
+			return errors.New("webhook hostname must resolve only to public IP addresses")
+		}
 	}
 	return nil
 }
 
+func isPublicWebhookIP(ip net.IP) bool {
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	address = address.Unmap()
+	if !address.IsGlobalUnicast() || address.IsPrivate() {
+		return false
+	}
+	for _, prefix := range blockedWebhookPrefixes {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+var blockedWebhookPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"), netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"), netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"), netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"), netip.MustParsePrefix("ff00::/8"),
+}
+
+func safeWebhookDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	hostname, port, err := net.SplitHostPort(address)
+	if err != nil || port != "443" {
+		return nil, errors.New("webhook connection must use HTTPS port 443")
+	}
+	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, hostname)
+	if err != nil {
+		return nil, fmt.Errorf("resolve webhook hostname: %w", err)
+	}
+	dialer := &net.Dialer{Timeout: 8 * time.Second}
+	var lastErr error
+	for _, resolved := range addresses {
+		if !isPublicWebhookIP(resolved.IP) {
+			return nil, errors.New("webhook hostname resolved to a non-public IP address")
+		}
+		connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(resolved.IP.String(), port))
+		if dialErr == nil {
+			return connection, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errors.New("webhook hostname has no usable public address")
+}
+
 func postWebhook(ctx context.Context, target string, event domain.RealtimeEvent) error {
-	if err := validateWebhookURL(target); err != nil {
+	if err := validateWebhookURL(ctx, target); err != nil {
 		return err
 	}
 	payload, err := json.Marshal(event)
@@ -195,7 +302,13 @@ func postWebhook(ctx context.Context, target string, event domain.RealtimeEvent)
 	client := &http.Client{
 		Timeout: 12 * time.Second,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			return validateWebhookURL(request.URL.String())
+			return validateWebhookURL(request.Context(), request.URL.String())
+		},
+		Transport: &http.Transport{
+			Proxy:                 nil,
+			DialContext:           safeWebhookDialContext,
+			TLSHandshakeTimeout:   8 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
 		},
 	}
 	response, err := client.Do(request)

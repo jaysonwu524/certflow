@@ -127,7 +127,7 @@ MVP 页面与主要交互：
 | `/certificates` | 证书列表，展示域名、有效期、续期状态、最近部署状态 |
 | `/certificates/new` | 分步创建：ACME、逐 SAN 的 DNS/Zone 选择、域名与通配符、密钥算法、DNS-01、自动续期、部署关联 |
 | `/certificates/[id]` | 证书详情、SAN 域名、有效期、关联目标、执行记录；可手动签发、续期和部署 |
-| `/automations` | 自动化任务、续期策略与 ALB 部署目标 |
+| `/automations` | 自动化任务、续期策略与 ALB 监听器配置 |
 | `/executions` | 可按状态、任务类型、证书、部署目标、时间筛选的执行记录 |
 | `/executions/[id]` | 工作流步骤、耗时、脱敏错误和重试操作 |
 | `/notification-endpoints` | 失败 Webhook 的配置、启停与测试投递 |
@@ -325,7 +325,7 @@ DNS 账户使用 `cloud_credential_id`，部署目标也使用该外键。首版
 
 ### 5.6 自动化、通知与执行
 
-MVP 不实现任意流程图，而用明确的自动化任务类型：`renew_certificate` 负责定期检查并续期证书；`upload_ssl` 把当前版本同步到阿里云 SSL 证书管理；`deploy_alb` 上传当前版本并更新选定的 ALB Listener。每个上传/ALB 任务持久化远端 `CertId` 及其对应的证书版本：同一版本重复执行时直接复用 `CertId`，不会重复创建资源；证书产生新版本时，因阿里云 CAS 不提供原地更新用户证书的 API，只能调用 `UploadUserCertificate` 创建新资源，再由 ALB 切换到新的 `CertId`。旧资源不自动删除，待确认无其他引用后再通过受控清理任务回收。续期任务的周期是检查频率，真正是否续期仍由证书的 `renew_before_days` 决定，避免按固定周期重复申请触发 ACME 频率限制。上传和 ALB 任务在创建时、证书版本更新时和手动执行时运行。
+MVP 不实现任意流程图，而用明确的自动化任务类型：`renew_certificate` 负责定期检查并续期证书；`upload_ssl` 把当前版本同步到阿里云 SSL 证书管理；`deploy_alb` 上传当前版本并更新选定的 ALB Listener。每个上传/ALB 任务持久化远端 `CertId` 及其对应的证书版本：同一版本重复执行时直接复用 `CertId`，不会重复创建资源；证书产生新版本时，因阿里云 CAS 不提供原地更新用户证书的 API，只能调用 `UploadUserCertificate` 创建新资源，再由 ALB 切换到新的 `CertId`。旧资源不自动删除，待确认无其他引用后再通过受控清理任务回收。续期任务的周期是检查频率，真正是否续期仍由证书的 `renew_before_days` 决定，避免按固定周期重复申请触发 ACME 频率限制。上传和 ALB 任务在证书版本更新或手动执行时运行，不会因任务创建而自动调用云 API。
 
 `automation_tasks` 表：
 
@@ -339,7 +339,7 @@ MVP 不实现任意流程图，而用明确的自动化任务类型：`renew_cer
 | `next_run_at` / `last_run_at` | 调度时间 |
 | `last_status` / `last_error` | 最近一次任务状态和脱敏错误 |
 
-`automation_task_targets` 表连接 `deploy_alb` 任务和一个或多个 `deployment_targets`，并按目标保存远端 `CertId` 及其 `last_uploaded_version_id`；这是必要的，因为不同 ALB 目标可能使用不同阿里云账号，证书资源不能跨账号复用。`upload_ssl` 任务需要一个云凭证并在任务级保存远端证书状态，`deploy_alb` 任务在创建时和每次证书版本更新后自动执行“上传 SSL → 更新 ALB”。只有 `renew_certificate` 任务参与周期扫描；暂停或删除该任务即可停止自动续期。旧的 `renew_enabled` 仅作为历史字段保留，不再作为新策略入口。
+`automation_task_targets` 表连接 `deploy_alb` 任务和一个或多个 `deployment_targets`，并按目标保存远端 `CertId` 及其 `last_uploaded_version_id`；这是必要的，因为不同 ALB 目标可能使用不同阿里云账号，证书资源不能跨账号复用。目标表是内部可复用资源，不作为独立的日常操作入口：创建 ALB 自动化时可直接配置云凭证、地域、ALB 与监听器，服务端会在同一事务中复用或创建目标并建立关联。删除任务后，没有其他任务或旧部署引用的目标会被软删除。`upload_ssl` 任务需要一个云凭证并在任务级保存远端证书状态，`deploy_alb` 任务在证书版本更新后自动执行“上传 SSL → 更新 ALB”。新建任务只保存配置，不会立即调用外部 API；用户可手动执行，或等待证书版本更新/续期调度触发。只有 `renew_certificate` 任务参与周期扫描；新建后的首次检查从一个完整检查周期后开始，暂停或删除该任务即可停止自动续期。旧的 `renew_enabled` 仅作为历史字段保留，不再作为新策略入口。
 
 `notification_endpoints` 表：
 
@@ -566,8 +566,8 @@ worker 定期续租。进程崩溃后，reaper 将过期 lease 的任务归还�
 | `GET` | `/api/v1/certificates/{id}/manual-challenge/check` | 使用服务端 resolver 检查手动 DNS TXT 是否已解析；结果仅作传播辅助判断 |
 | `POST` | `/api/v1/certificates/{id}/renew` | 创建续期任务 |
 | `POST` | `/api/v1/certificates/{id}/revoke` | 撤销当前版本；需理由和强确认 |
-| `POST` / `GET` | `/api/v1/deployment-targets` | 创建、查询 ALB 部署目标 |
-| `POST` / `GET` | `/api/v1/automations` | 创建、查询自动化任务 |
+| `POST` / `GET` | `/api/v1/deployment-targets` | 兼容接口：创建、查询 ALB 部署目标；新 UI 通过自动化任务表单管理目标 |
+| `POST` / `GET` | `/api/v1/automations` | 创建、查询自动化任务；`deploy_alb` 创建请求可携带 `inlineDeploymentTarget`，由服务端原子复用或创建目标并建立关联 |
 | `POST` | `/api/v1/automations/{id}/run` | 立即排队执行一次自动化任务 |
 | `POST` | `/api/v1/certificates/{id}/deployments` | 绑定部署目标 |
 | `POST` | `/api/v1/certificate-deployments/{id}/deploy` | 手动创建部署任务 |

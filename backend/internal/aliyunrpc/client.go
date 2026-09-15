@@ -36,9 +36,13 @@ type Client struct {
 	nonce      func() string
 }
 
+const defaultRequestTimeout = 45 * time.Second
+
 func New(httpClient *http.Client) *Client {
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		// Provider requests run in background workers. A bounded timeout prevents
+		// an unreachable endpoint from holding a job lease indefinitely.
+		httpClient = &http.Client{Timeout: defaultRequestTimeout}
 	}
 	return &Client{httpClient: httpClient, now: time.Now, nonce: id.New}
 }

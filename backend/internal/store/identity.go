@@ -227,13 +227,17 @@ func (s *Store) AuthenticateCode(ctx context.Context, email string) (User, error
 	return user, err
 }
 
-func (s *Store) CreateSession(ctx context.Context, user User, ttl time.Duration) (Session, error) {
+func (s *Store) CreateSession(ctx context.Context, user User, ttl time.Duration, deviceLabel ...string) (Session, error) {
 	token, err := randomToken()
 	if err != nil {
 		return Session{}, err
 	}
 	session := Session{Token: token, ExpiresAt: time.Now().UTC().Add(ttl), User: user}
-	_, err = s.pool.Exec(ctx, `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`, id.New(), user.ID, tokenHash(token), session.ExpiresAt)
+	label := "Web browser"
+	if len(deviceLabel) > 0 && strings.TrimSpace(deviceLabel[0]) != "" {
+		label = strings.TrimSpace(deviceLabel[0])
+	}
+	_, err = s.pool.Exec(ctx, `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at, device_label) VALUES ($1, $2, $3, $4, $5)`, id.New(), user.ID, tokenHash(token), session.ExpiresAt, label)
 	return session, err
 }
 
@@ -258,6 +262,57 @@ func (s *Store) SessionUser(ctx context.Context, token string, idleTTL time.Dura
 func (s *Store) RevokeSession(ctx context.Context, token string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE auth_sessions SET revoked_at = now() WHERE token_hash = $1 AND revoked_at IS NULL`, tokenHash(token))
 	return err
+}
+
+func (s *Store) ListUserSessions(ctx context.Context, currentToken string) ([]AuthSessionSummary, error) {
+	userID := actorID(ctx)
+	if userID == "" {
+		return nil, errors.New("session owner is missing")
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, device_label, created_at, last_seen_at, expires_at, token_hash = $2
+		FROM auth_sessions
+		WHERE user_id = $1::uuid AND revoked_at IS NULL AND expires_at > now()
+		ORDER BY token_hash = $2 DESC, last_seen_at DESC
+	`, userID, tokenHash(currentToken))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sessions := make([]AuthSessionSummary, 0)
+	for rows.Next() {
+		var session AuthSessionSummary
+		if err := rows.Scan(&session.ID, &session.DeviceLabel, &session.CreatedAt, &session.LastSeenAt, &session.ExpiresAt, &session.IsCurrent); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, session)
+	}
+	return sessions, rows.Err()
+}
+
+// RevokeOtherUserSessions preserves the request's access and refresh credentials
+// while invalidating every other signed-in browser for this user.
+func (s *Store) RevokeOtherUserSessions(ctx context.Context, currentAccessToken, currentRefreshToken string) (int64, error) {
+	userID := actorID(ctx)
+	if userID == "" {
+		return 0, errors.New("session owner is missing")
+	}
+	result, err := s.pool.Exec(ctx, `
+		UPDATE auth_sessions
+		SET revoked_at = now()
+		WHERE user_id = $1::uuid AND revoked_at IS NULL AND token_hash <> $2
+	`, userID, tokenHash(currentAccessToken))
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE auth_refresh_tokens
+		SET revoked_at = now()
+		WHERE user_id = $1::uuid AND revoked_at IS NULL AND token_hash <> $2
+	`, userID, tokenHash(currentRefreshToken)); err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 func (s *Store) CreateRefreshToken(ctx context.Context, user User, ttl time.Duration, persistent bool) (RefreshSession, error) {

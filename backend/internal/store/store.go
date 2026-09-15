@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/regenbio/certflow/internal/domain"
 	"github.com/regenbio/certflow/internal/id"
@@ -79,6 +80,12 @@ var automationRunsAndAssetsMigration string
 //go:embed migrations/021_notification_delivery.sql
 var notificationDeliveryMigration string
 
+//go:embed migrations/022_automation_task_owner_name.sql
+var automationTaskOwnerNameMigration string
+
+//go:embed migrations/023_profile_security.sql
+var profileSecurityMigration string
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -101,6 +108,9 @@ var ErrCertificateJobInProgress = errors.New("certificate issuance is already in
 // ErrAutomationRunInProgress prevents accidental duplicate manual runs for a
 // task while an earlier batch is still queued or executing.
 var ErrAutomationRunInProgress = errors.New("automation task already has a running batch")
+
+// ErrAutomationNameExists keeps database constraint details out of API responses.
+var ErrAutomationNameExists = errors.New("automation task name already exists")
 
 // ResourceInUseError carries a small, non-sensitive impact summary so the UI
 // can tell an operator why deletion is blocked without exposing SQL details.
@@ -154,6 +164,15 @@ type Session struct {
 	User      User
 }
 
+type AuthSessionSummary struct {
+	ID          string    `json:"id"`
+	DeviceLabel string    `json:"deviceLabel"`
+	CreatedAt   time.Time `json:"createdAt"`
+	LastSeenAt  time.Time `json:"lastSeenAt"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+	IsCurrent   bool      `json:"isCurrent"`
+}
+
 type RefreshSession struct {
 	Token      string
 	ExpiresAt  time.Time
@@ -186,9 +205,12 @@ type ClaimedNotificationDelivery struct {
 }
 
 type PersonalWebhookSettings struct {
-	EndpointID    string
-	Enabled       bool
-	URLCiphertext []byte
+	EndpointID         string
+	Enabled            bool
+	URLCiphertext      []byte
+	LastDeliveryStatus string
+	LastDeliveryAt     *time.Time
+	LastDeliveryError  string
 }
 
 type DeploymentConfiguration struct {
@@ -374,6 +396,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		{version: 19, sql: notificationReadsMigration},
 		{version: 20, sql: automationRunsAndAssetsMigration},
 		{version: 21, sql: notificationDeliveryMigration},
+		{version: 22, sql: automationTaskOwnerNameMigration},
+		{version: 23, sql: profileSecurityMigration},
 	}
 	for _, migration := range migrations {
 		var applied bool
@@ -511,7 +535,20 @@ func (s *Store) GetPersonalWebhookSettings(ctx context.Context) (PersonalWebhook
 	if err == pgx.ErrNoRows {
 		return PersonalWebhookSettings{}, nil
 	}
-	return settings, err
+	if err != nil {
+		return PersonalWebhookSettings{}, err
+	}
+	lastErr := s.pool.QueryRow(ctx, `
+		SELECT status, updated_at, COALESCE(last_error, '')
+		FROM notification_deliveries
+		WHERE owner_user_id = $1::uuid AND channel = 'webhook' AND endpoint_id = $2::uuid
+		ORDER BY updated_at DESC, id DESC
+		LIMIT 1
+	`, actorID(ctx), settings.EndpointID).Scan(&settings.LastDeliveryStatus, &settings.LastDeliveryAt, &settings.LastDeliveryError)
+	if lastErr == pgx.ErrNoRows {
+		return settings, nil
+	}
+	return settings, lastErr
 }
 
 func (s *Store) SavePersonalWebhookSettings(ctx context.Context, enabled bool, urlCiphertext []byte) error {
@@ -1155,6 +1192,10 @@ func (s *Store) UpdateAutomationTask(ctx context.Context, taskID string, input d
 	owner := ownerID(ctx)
 	result, err := tx.Exec(ctx, `UPDATE automation_tasks SET name = $2, certificate_id = $3, action_type = $4, interval_minutes = $5, cloud_credential_id = NULLIF($6, '')::uuid, enabled = $7, config_version = config_version + 1, updated_at = now() WHERE id = $1 AND deleted_at IS NULL AND ($8 = '' OR owner_user_id = $8::uuid)`, taskID, input.Name, input.CertificateID, input.ActionType, input.IntervalMinutes, input.CloudCredentialID, input.Enabled, owner)
 	if err != nil {
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && databaseError.Code == "23505" && (databaseError.ConstraintName == "automation_tasks_name_key" || databaseError.ConstraintName == "automation_tasks_owner_name_key") {
+			return ErrAutomationNameExists
+		}
 		return err
 	}
 	if result.RowsAffected() == 0 {
@@ -1189,6 +1230,24 @@ func (s *Store) DeleteAutomationTask(ctx context.Context, taskID string) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `SELECT deployment_target_id::text FROM automation_task_targets WHERE automation_task_id = $1`, taskID)
+	if err != nil {
+		return err
+	}
+	targetIDs := make([]string, 0)
+	for rows.Next() {
+		var targetID string
+		if err := rows.Scan(&targetID); err != nil {
+			rows.Close()
+			return err
+		}
+		targetIDs = append(targetIDs, targetID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
 	result, err := tx.Exec(ctx, `UPDATE automation_tasks SET deleted_at = now(), enabled = false, updated_at = now() WHERE id = $1 AND deleted_at IS NULL AND ($2 = '' OR owner_user_id = $2::uuid)`, taskID, ownerID(ctx))
 	if err != nil {
 		return err
@@ -1202,6 +1261,29 @@ func (s *Store) DeleteAutomationTask(ctx context.Context, taskID string) error {
 	if _, err := tx.Exec(ctx, `UPDATE automation_runs SET status = 'cancelled', finished_at = now(), updated_at = now() WHERE automation_task_id = $1 AND status = 'queued'`, taskID); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM automation_task_targets WHERE automation_task_id = $1`, taskID); err != nil {
+		return err
+	}
+	// Targets are implementation resources for ALB tasks. Once no live task or
+	// legacy certificate deployment references one, remove it from the active
+	// inventory so users never accumulate inaccessible orphaned targets.
+	for _, targetID := range targetIDs {
+		if _, err := tx.Exec(ctx, `
+			UPDATE deployment_targets SET deleted_at = now(), status = 'disabled', updated_at = now()
+			WHERE id = $1 AND deleted_at IS NULL
+			  AND NOT EXISTS (
+				SELECT 1 FROM automation_task_targets tt
+				JOIN automation_tasks at ON at.id = tt.automation_task_id
+				WHERE tt.deployment_target_id = $1 AND at.deleted_at IS NULL
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM certificate_deployments cd
+				WHERE cd.deployment_target_id = $1 AND cd.enabled
+			  )
+		`, targetID); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 
@@ -1214,15 +1296,102 @@ func (s *Store) CreateAutomationTask(ctx context.Context, taskID string, input d
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := s.createAutomationTaskTx(ctx, tx, taskID, input); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// CreateAutomationTaskWithInlineTarget keeps the operator workflow atomic:
+// the task, an optional newly configured ALB listener target, and their link
+// are committed together or not at all.
+func (s *Store) CreateAutomationTaskWithInlineTarget(ctx context.Context, taskID, newTargetID string, input domain.CreateAutomationTaskInput, listenerProtocol string) error {
+	if input.InlineDeploymentTarget == nil {
+		return errors.New("inline deployment target is required")
+	}
+	if input.IntervalMinutes == 0 {
+		input.IntervalMinutes = 60
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	owner := ownerID(ctx)
+	target := input.InlineDeploymentTarget
+	var targetID string
+	err = tx.QueryRow(ctx, `
+		SELECT id::text FROM deployment_targets
+		WHERE cloud_credential_id = $1::uuid
+		  AND config->>'region_id' = $2
+		  AND config->>'load_balancer_id' = $3
+		  AND config->>'listener_id' = $4
+		  AND status = 'active' AND deleted_at IS NULL
+		  AND ($5 = '' OR owner_user_id = $5::uuid)
+		LIMIT 1 FOR UPDATE
+	`, target.CloudCredentialID, target.RegionID, target.LoadBalancerID, target.ListenerID, owner).Scan(&targetID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		config, marshalErr := json.Marshal(map[string]string{
+			"region_id":         target.RegionID,
+			"load_balancer_id":  target.LoadBalancerID,
+			"listener_id":       target.ListenerID,
+			"listener_protocol": listenerProtocol,
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		result, insertErr := tx.Exec(ctx, `
+			INSERT INTO deployment_targets (id, name, type, cloud_credential_id, config, status, owner_user_id)
+			SELECT $1, $2, 'aliyun_alb', $3::uuid, $4::jsonb, 'active', NULLIF($5, '')::uuid
+			WHERE EXISTS (
+				SELECT 1 FROM cloud_credentials
+				WHERE id = $3::uuid AND status = 'active' AND deleted_at IS NULL
+				  AND ($6 = '' OR owner_user_id = $6::uuid)
+			)
+		`, newTargetID, target.Name, target.CloudCredentialID, config, actorID(ctx), owner)
+		if insertErr != nil {
+			return insertErr
+		}
+		if result.RowsAffected() == 0 {
+			return fmt.Errorf("cloud credential is unavailable")
+		}
+		targetID = newTargetID
+	}
+
+	input.DeploymentTargetIDs = appendUniqueTargetID(input.DeploymentTargetIDs, targetID)
+	if err := s.createAutomationTaskTx(ctx, tx, taskID, input); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func appendUniqueTargetID(targetIDs []string, targetID string) []string {
+	for _, existing := range targetIDs {
+		if existing == targetID {
+			return targetIDs
+		}
+	}
+	return append(targetIDs, targetID)
+}
+
+func (s *Store) createAutomationTaskTx(ctx context.Context, tx pgx.Tx, taskID string, input domain.CreateAutomationTaskInput) error {
 	owner := ownerID(ctx)
 	writerID := actorID(ctx)
 	result, err := tx.Exec(ctx, `
 		INSERT INTO automation_tasks (id, name, certificate_id, action_type, interval_minutes, cloud_credential_id, enabled, next_run_at, owner_user_id)
-		SELECT $1, $2, $3, $4, $5, NULLIF($6, '')::uuid, $7, now(), NULLIF($8, '')::uuid
+		SELECT $1, $2, $3, $4, $5, NULLIF($6, '')::uuid, $7, now() + ($5::int * interval '1 minute'), NULLIF($8, '')::uuid
 		WHERE EXISTS (SELECT 1 FROM certificates WHERE id = $3 AND deleted_at IS NULL AND ($9 = '' OR owner_user_id = $9::uuid))
 		  AND ($6 = '' OR EXISTS (SELECT 1 FROM cloud_credentials WHERE id = $6::uuid AND status = 'active' AND deleted_at IS NULL AND ($9 = '' OR owner_user_id = $9::uuid)))
 	`, taskID, input.Name, input.CertificateID, input.ActionType, input.IntervalMinutes, input.CloudCredentialID, input.Enabled, writerID, owner)
 	if err != nil {
+		var databaseError *pgconn.PgError
+		if errors.As(err, &databaseError) && databaseError.Code == "23505" && (databaseError.ConstraintName == "automation_tasks_name_key" || databaseError.ConstraintName == "automation_tasks_owner_name_key") {
+			return ErrAutomationNameExists
+		}
 		return err
 	}
 	if result.RowsAffected() == 0 {
@@ -1243,7 +1412,7 @@ func (s *Store) CreateAutomationTask(ctx context.Context, taskID string, input d
 			return fmt.Errorf("deployment target is unavailable")
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // QueueAutomationRun immediately executes a task's action as one atomic
@@ -1331,16 +1500,16 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 	} else if task.ActionType == "upload_ssl" {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
-			VALUES ($1, 'upload', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'cloud_credential_id', $5::text), $2::uuid, $6::uuid, now(), 0, 5)
-		`, id.New(), task.ID, "manual:"+id.New(), task.CertificateID, task.CloudCredentialID, runID); err != nil {
+			VALUES ($1, 'upload', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'cloud_credential_id', $5::text), $7::uuid, $6::uuid, now(), 0, 5)
+		`, id.New(), task.ID, "manual:"+id.New(), task.CertificateID, task.CloudCredentialID, runID, task.ID); err != nil {
 			return AutomationRunQueueResult{}, err
 		}
 	} else {
 		for _, targetID := range targetIDs {
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
-				VALUES ($1, 'deploy', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'deployment_target_id', $5::text), $2::uuid, $6::uuid, now(), 0, 5)
-			`, id.New(), task.ID, "manual:"+id.New(), task.CertificateID, targetID, runID); err != nil {
+				VALUES ($1, 'deploy', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'deployment_target_id', $5::text), $7::uuid, $6::uuid, now(), 0, 5)
+			`, id.New(), task.ID, "manual:"+id.New(), task.CertificateID, targetID, runID, task.ID); err != nil {
 				return AutomationRunQueueResult{}, err
 			}
 		}
@@ -2413,9 +2582,9 @@ func (s *Store) SaveCertificateVersion(ctx context.Context, material Certificate
 		if task.actionType == "upload_ssl" {
 			result, err := tx.Exec(ctx, `
 				INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
-				VALUES ($1, 'upload', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'cloud_credential_id', $5::text), $2::uuid, $6::uuid, now(), 0, 5)
+				VALUES ($1, 'upload', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'cloud_credential_id', $5::text), $7::uuid, $6::uuid, now(), 0, 5)
 				ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
-			`, id.New(), task.id, material.ID, material.CertificateID, task.credentialID, runID)
+			`, id.New(), task.id, material.ID, material.CertificateID, task.credentialID, runID, task.id)
 			if err != nil {
 				return err
 			}
@@ -2424,9 +2593,9 @@ func (s *Store) SaveCertificateVersion(ctx context.Context, material Certificate
 			for _, targetID := range task.targetIDs {
 				result, err := tx.Exec(ctx, `
 					INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
-					VALUES ($1, 'deploy', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'deployment_target_id', $5::text), $2::uuid, $6::uuid, now(), 0, 5)
+					VALUES ($1, 'deploy', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'deployment_target_id', $5::text), $7::uuid, $6::uuid, now(), 0, 5)
 					ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
-				`, id.New(), task.id, material.ID+":"+targetID, material.CertificateID, targetID, runID)
+				`, id.New(), task.id, material.ID+":"+targetID, material.CertificateID, targetID, runID, task.id)
 				if err != nil {
 					return err
 				}
@@ -2780,7 +2949,7 @@ func refreshAutomationRun(ctx context.Context, tx pgx.Tx, runID string) error {
 		SELECT r.automation_task_id::text, COALESCE((
 			SELECT e.error_message FROM workflow_executions e
 			JOIN jobs failed_job ON failed_job.id = e.job_id
-			WHERE failed_job.automation_run_id = r.id AND e.status = 'failed'
+			WHERE failed_job.automation_run_id = r.id AND failed_job.status = 'failed' AND e.status = 'failed'
 			ORDER BY e.finished_at DESC NULLS LAST LIMIT 1
 		), ''),
 			COUNT(j.id),
@@ -2791,7 +2960,7 @@ func refreshAutomationRun(ctx context.Context, tx pgx.Tx, runID string) error {
 		FROM automation_runs r
 		LEFT JOIN jobs j ON j.automation_run_id = r.id
 		WHERE r.id = $1
-		GROUP BY r.automation_task_id
+		GROUP BY r.id, r.automation_task_id
 	`, runID).Scan(&taskID, &lastError, &total, &succeeded, &failed, &active, &waiting); err != nil {
 		return err
 	}

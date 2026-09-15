@@ -4,8 +4,10 @@ package cas
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/regenbio/certflow/internal/aliyunrpc"
 )
@@ -27,6 +29,27 @@ func (c *Client) UploadUserCertificate(ctx context.Context, credentials Credenti
 		return "", err
 	}
 	return parseCertificateID(response.CertID)
+}
+
+// UserCertificateExists confirms that a CAS certificate ID can still be read.
+// The API returns a non-2xx response for a deleted or otherwise unavailable ID.
+func (c *Client) UserCertificateExists(ctx context.Context, credentials Credentials, certificateID string) (bool, error) {
+	if strings.TrimSpace(certificateID) == "" {
+		return false, nil
+	}
+	var response struct{}
+	err := c.rpc.Call(ctx, endpoint, apiVersion, "DescribeUserCertificate", credentials, url.Values{"CertId": {certificateID}}, &response)
+	if err == nil {
+		return true, nil
+	}
+	var providerError *aliyunrpc.Error
+	if errors.As(err, &providerError) {
+		code := strings.ToLower(providerError.Code)
+		if strings.Contains(code, "notfound") || strings.Contains(code, "notexist") || strings.Contains(code, "not_found") || strings.Contains(code, "not_exist") {
+			return false, nil
+		}
+	}
+	return false, err
 }
 
 func parseCertificateID(raw json.RawMessage) (string, error) {

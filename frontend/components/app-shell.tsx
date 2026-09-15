@@ -176,7 +176,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isAdmin = currentUser?.role === "admin";
   const selectedTheme = theme ?? "system";
   useEffect(() => {
-    if (pathname === "/login" || pathname === "/register") return;
+    if (pathname === "/" || pathname === "/login" || pathname === "/register") return;
     fetch("/api/auth/me")
       .then(async (response) => {
         if (response.ok) return response.json();
@@ -199,7 +199,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     router.replace("/login");
     router.refresh();
   }
-  if (pathname === "/login" || pathname === "/register") return <>{children}</>;
+  if (pathname === "/" || pathname === "/login" || pathname === "/register") return <>{children}</>;
   return (
     <div className={`app-frame ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className={`sidebar ${navOpen ? "mobile-nav-open" : ""}`}>

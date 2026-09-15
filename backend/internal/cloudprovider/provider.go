@@ -73,6 +73,14 @@ type CertificateUploadProvider interface {
 	UploadCertificate(ctx context.Context, credentials Credentials, req UploadCertificateRequest) (string, error)
 }
 
+// CertificateLookupProvider verifies a provider-side certificate before a
+// previously stored remote ID is reused by an upload or deployment task.
+type CertificateLookupProvider interface {
+	Provider
+
+	CertificateExists(ctx context.Context, credentials Credentials, certificateID string) (bool, error)
+}
+
 // UploadCertificateRequest contains certificate upload parameters.
 type UploadCertificateRequest struct {
 	Name           string

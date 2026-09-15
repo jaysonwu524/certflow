@@ -26,6 +26,7 @@ type Provider struct {
 var (
 	_ cloudprovider.DNSProvider               = (*Provider)(nil)
 	_ cloudprovider.CertificateUploadProvider = (*Provider)(nil)
+	_ cloudprovider.CertificateLookupProvider = (*Provider)(nil)
 	_ cloudprovider.LoadBalancerProvider      = (*Provider)(nil)
 )
 
@@ -276,6 +277,14 @@ func (p *Provider) UploadCertificate(ctx context.Context, credentials cloudprovi
 	}
 
 	return p.casClient.UploadUserCertificate(ctx, toAliyunRPCCredentials(aliyunCred), req.Name, fullCert, req.PrivateKeyPEM)
+}
+
+func (p *Provider) CertificateExists(ctx context.Context, credentials cloudprovider.Credentials, certificateID string) (bool, error) {
+	aliyunCred, ok := credentials.(Credentials)
+	if !ok {
+		return false, fmt.Errorf("invalid credential type for aliyun provider")
+	}
+	return p.casClient.UserCertificateExists(ctx, toAliyunRPCCredentials(aliyunCred), certificateID)
 }
 
 // --- LoadBalancerProvider implementation ---

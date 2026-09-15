@@ -96,6 +96,8 @@ func (s *Server) Router() http.Handler {
 		api.Get("/profile/webhook", s.getPersonalWebhook)
 		api.Put("/profile/webhook", s.updatePersonalWebhook)
 		api.Post("/profile/webhook/test", s.testPersonalWebhook)
+		api.Get("/profile/sessions", s.listProfileSessions)
+		api.Post("/profile/sessions/revoke-others", s.revokeOtherProfileSessions)
 		api.Get("/dashboard", s.dashboard)
 		api.Get("/cloud-credentials", s.listCloudCredentials)
 		api.Post("/cloud-credentials", s.createCloudCredential)
@@ -765,7 +767,7 @@ func (s *Server) listALBRegions(w http.ResponseWriter, r *http.Request) {
 	}
 	regions, err := alb.New().ListRegions(r.Context(), credentials)
 	if err != nil {
-		writeAliyunError(w, err)
+		writeALBOperationError(w, err, "describe_regions")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": regions})
@@ -784,12 +786,12 @@ func (s *Server) listALBListeners(w http.ResponseWriter, r *http.Request) {
 	}
 	loadBalancer, err := alb.New().GetLoadBalancer(r.Context(), credentials, regionID, loadBalancerID)
 	if err != nil {
-		writeAliyunError(w, err)
+		writeALBOperationError(w, err, "get_load_balancer")
 		return
 	}
 	listeners, err := alb.New().ListListeners(r.Context(), credentials, regionID, loadBalancerID)
 	if err != nil {
-		writeAliyunError(w, err)
+		writeALBOperationError(w, err, "list_listeners")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"loadBalancer": loadBalancer, "data": listeners})
@@ -807,7 +809,7 @@ func (s *Server) listALBLoadBalancers(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := alb.New().ListLoadBalancers(r.Context(), credentials, regionID)
 	if err != nil {
-		writeAliyunError(w, err)
+		writeALBOperationError(w, err, "list_load_balancers")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": items})
@@ -833,6 +835,33 @@ func (s *Server) listDeploymentTargets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": targets})
+}
+
+// resolveALBListenerProtocol performs a live ALB lookup before persisting an
+// inline target. The database transaction can then stay local and atomic while
+// CertFlow still rejects stale, foreign, or non-TLS listeners.
+func (s *Server) resolveALBListenerProtocol(w http.ResponseWriter, r *http.Request, input domain.CreateDeploymentTargetInput) (string, bool) {
+	credentials, ok := s.albCredentialsForID(w, r, input.CloudCredentialID)
+	if !ok {
+		return "", false
+	}
+	listeners, err := alb.New().ListListeners(r.Context(), credentials, input.RegionID, input.LoadBalancerID)
+	if err != nil {
+		writeALBOperationError(w, err, "list_listeners")
+		return "", false
+	}
+	for _, listener := range listeners {
+		if listener.ID != input.ListenerID {
+			continue
+		}
+		if listener.Protocol != "HTTPS" && listener.Protocol != "QUIC" {
+			writeError(w, http.StatusUnprocessableEntity, "listener_protocol_unsupported", "only HTTPS or QUIC ALB listeners can use certificates")
+			return "", false
+		}
+		return listener.Protocol, true
+	}
+	writeError(w, http.StatusUnprocessableEntity, "alb_listener_not_found", "the selected listener is not available on this ALB")
+	return "", false
 }
 
 func (s *Server) createDeploymentTarget(w http.ResponseWriter, r *http.Request) {
@@ -1026,11 +1055,19 @@ func (s *Server) updateAutomation(w http.ResponseWriter, r *http.Request) {
 	if input.IntervalMinutes == 0 {
 		input.IntervalMinutes = 60
 	}
+	if input.InlineDeploymentTarget != nil {
+		writeError(w, http.StatusUnprocessableEntity, "inline_target_update_unsupported", "ALB targets are immutable after task creation; select an existing target or create a new task")
+		return
+	}
 	if err := validateAutomation(input); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "invalid_automation", err.Error())
 		return
 	}
 	if err := s.store.UpdateAutomationTask(r.Context(), chi.URLParam(r, "automationID"), input); err != nil {
+		if errors.Is(err, store.ErrAutomationNameExists) {
+			writeError(w, http.StatusConflict, "automation_name_exists", "自动化任务名称已存在，请使用其他名称")
+			return
+		}
 		writeResourceUpdateError(w, err, "automation task")
 		return
 	}
@@ -1063,22 +1100,32 @@ func (s *Server) createAutomation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := id.New()
-	if err := s.store.CreateAutomationTask(r.Context(), taskID, input); err != nil {
+	var err error
+	if input.InlineDeploymentTarget != nil {
+		protocol, ok := s.resolveALBListenerProtocol(w, r, *input.InlineDeploymentTarget)
+		if !ok {
+			return
+		}
+		newTargetID := id.New()
+		if input.InlineDeploymentTarget.Name == "" {
+			input.InlineDeploymentTarget.Name = "ALB " + newTargetID[:8]
+		}
+		err = s.store.CreateAutomationTaskWithInlineTarget(r.Context(), taskID, newTargetID, input, protocol)
+	} else {
+		err = s.store.CreateAutomationTask(r.Context(), taskID, input)
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrAutomationNameExists) {
+			writeError(w, http.StatusConflict, "automation_name_exists", "自动化任务名称已存在，请使用其他名称")
+			return
+		}
 		writeError(w, http.StatusUnprocessableEntity, "automation_create_failed", err.Error())
 		return
 	}
-	status := "scheduled"
-	runID := ""
-	if input.Enabled && input.ActionType != "renew_certificate" {
-		result, err := s.store.QueueAutomationRun(r.Context(), taskID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "automation_initial_run_failed", "automation was created but could not be queued")
-			return
-		}
-		status = result.Status
-		runID = result.ID
-	}
-	writeJSON(w, http.StatusCreated, map[string]string{"id": taskID, "status": status, "runId": runID})
+	// Creating a task only stores its policy. External work starts when the
+	// user explicitly runs it, when a new certificate version is issued, or
+	// when the scheduler reaches the first due check.
+	writeJSON(w, http.StatusCreated, map[string]string{"id": taskID, "status": "scheduled", "runId": ""})
 }
 
 func (s *Server) runAutomation(w http.ResponseWriter, r *http.Request) {
@@ -1263,6 +1310,54 @@ func writeAliyunError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusBadGateway, "aliyun_unavailable", "Aliyun API is unavailable")
+}
+
+// writeALBOperationError keeps an Aliyun permission failure actionable without
+// exposing the signed request or cloud credential.  The provider error code is
+// intentionally retained for support, while the UI receives the exact RAM
+// action required by the failed operation.
+func writeALBOperationError(w http.ResponseWriter, err error, operation string) {
+	var provider *aliyunrpc.Error
+	if !errors.As(err, &provider) {
+		writeError(w, http.StatusBadGateway, "aliyun_unavailable", "Aliyun API is unavailable")
+		return
+	}
+
+	permission, ok := albOperationPermission(operation)
+	if ok && isAliyunPermissionError(provider.Code) {
+		writeErrorWithDetails(w, http.StatusForbidden, "aliyun_alb_permission_denied",
+			"当前云凭证没有读取阿里云 ALB 资源的权限。请在 RAM 中为该凭证关联的用户或角色授予 "+permission+" 后重试。",
+			map[string]any{
+				"requiredPermission": permission,
+				"operation":          operation,
+				"providerCode":       provider.Code,
+			})
+		return
+	}
+	writeError(w, http.StatusUnprocessableEntity, "aliyun_"+provider.Code, provider.Message)
+}
+
+func albOperationPermission(operation string) (string, bool) {
+	switch operation {
+	case "describe_regions":
+		return "alb:DescribeRegions", true
+	case "list_load_balancers":
+		return "alb:ListLoadBalancers", true
+	case "get_load_balancer":
+		return "alb:GetLoadBalancerAttribute", true
+	case "list_listeners":
+		return "alb:ListListeners", true
+	default:
+		return "", false
+	}
+}
+
+func isAliyunPermissionError(code string) bool {
+	code = strings.ToLower(strings.TrimSpace(code))
+	return strings.Contains(code, "forbidden") ||
+		strings.Contains(code, "permission") ||
+		strings.Contains(code, "unauthorized") ||
+		strings.Contains(code, "accessdenied")
 }
 
 func writeDNSAliyunError(w http.ResponseWriter, err error) {
@@ -1697,7 +1792,15 @@ func validateAutomation(input domain.CreateAutomationTaskInput) error {
 	if input.ActionType == "upload_ssl" && strings.TrimSpace(input.CloudCredentialID) == "" {
 		return errors.New("an Aliyun cloud credential is required for certificate upload")
 	}
-	if (input.ActionType == "deploy_alb" || input.ActionType == "renew_and_deploy_alb") && len(input.DeploymentTargetIDs) == 0 {
+	if input.InlineDeploymentTarget != nil {
+		if input.ActionType != "deploy_alb" {
+			return errors.New("an inline ALB target is only supported for ALB automation")
+		}
+		if strings.TrimSpace(input.InlineDeploymentTarget.CloudCredentialID) == "" || strings.TrimSpace(input.InlineDeploymentTarget.RegionID) == "" || strings.TrimSpace(input.InlineDeploymentTarget.LoadBalancerID) == "" || strings.TrimSpace(input.InlineDeploymentTarget.ListenerID) == "" {
+			return errors.New("cloud credential, region, load balancer, and listener are required for an ALB target")
+		}
+	}
+	if (input.ActionType == "deploy_alb" || input.ActionType == "renew_and_deploy_alb") && len(input.DeploymentTargetIDs) == 0 && input.InlineDeploymentTarget == nil {
 		return errors.New("at least one ALB target is required")
 	}
 	return nil
