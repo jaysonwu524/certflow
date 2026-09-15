@@ -1,138 +1,115 @@
+COMPOSE_DEV = docker compose -f deploy/compose/docker-compose.yml
+CONTROL_PLANE_DIR = apps/control-plane
+CONSOLE_DIR = apps/console
+
 .PHONY: help
 help: ## 显示帮助信息
 	@echo "CertFlow - 可用命令："
 	@echo ""
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: setup
-setup: ## 初始化开发环境
-	@echo "设置开发环境..."
-	@if [ ! -f .env ]; then \
-		cp .env.example .env; \
-		echo "已创建 .env 文件，请编辑并添加必要配置"; \
-	fi
+setup: ## 初始化本地开发环境
+	@if [ ! -f .env ]; then cp .env.example .env; echo "已创建 .env，请填写必要配置"; fi
 	@chmod 600 .env
-	cd frontend && npm install
+	cd $(CONSOLE_DIR) && npm install
 
-.PHONY: db-up
-db-up: ## 启动 PostgreSQL 数据库
-	docker compose up -d postgres
-	@echo "等待数据库就绪..."
-	@sleep 3
+.PHONY: db-up db-down db-reset
+db-up: ## 启动本地 PostgreSQL
+	$(COMPOSE_DEV) up -d postgres
 
-.PHONY: db-down
-db-down: ## 停止 PostgreSQL 数据库
-	docker compose down
+db-down: ## 停止本地 Docker 开发环境
+	$(COMPOSE_DEV) down
 
-.PHONY: db-reset
-db-reset: ## 重置数据库
-	docker compose down -v
-	docker compose up -d postgres
-	@sleep 3
+db-reset: ## 重置本地 PostgreSQL 数据（破坏性操作）
+	$(COMPOSE_DEV) down -v
+	$(COMPOSE_DEV) up -d postgres
 
-.PHONY: backend-run
-backend-run: ## 运行后端服务
-	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup 并填写配置"; exit 1; }; . ./.env; set +a; cd backend && go run ./cmd/certflow
+.PHONY: control-plane-run control-plane-build control-plane-test control-plane-test-coverage control-plane-lint
+control-plane-run: ## 运行 Control Plane
+	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup"; exit 1; }; . ./.env; set +a; cd $(CONTROL_PLANE_DIR) && go run ./cmd/certflow
+
+control-plane-build: ## 构建 Control Plane 与 dbinit
+	cd $(CONTROL_PLANE_DIR) && go build -o certflow ./cmd/certflow
+	cd $(CONTROL_PLANE_DIR) && go build -o dbinit ./cmd/dbinit
+
+control-plane-test: ## 运行 Control Plane 测试
+	cd $(CONTROL_PLANE_DIR) && go test -v ./...
+
+control-plane-test-coverage: ## 生成 Control Plane 覆盖率报告
+	cd $(CONTROL_PLANE_DIR) && go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+	cd $(CONTROL_PLANE_DIR) && go tool cover -html=coverage.out -o coverage.html
+
+control-plane-lint: ## 运行 Control Plane 静态检查
+	cd $(CONTROL_PLANE_DIR) && go vet ./...
 
 .PHONY: dbinit-run
-dbinit-run: ## 使用 .env 初始化数据库
-	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup 并填写配置"; exit 1; }; . ./.env; set +a; cd backend && go run ./cmd/dbinit
+dbinit-run: ## 使用 .env 创建外部 PostgreSQL 数据库
+	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup"; exit 1; }; . ./.env; set +a; cd $(CONTROL_PLANE_DIR) && go run ./cmd/dbinit
 
-.PHONY: backend-build
-backend-build: ## 构建后端二进制文件
-	cd backend && go build -o certflow ./cmd/certflow
-	cd backend && go build -o dbinit ./cmd/dbinit
+.PHONY: console-dev console-build console-lint
+console-dev: ## 运行 Console 开发服务器
+	cd $(CONSOLE_DIR) && npm run dev
 
-.PHONY: backend-test
-backend-test: ## 运行后端测试
-	cd backend && go test -v ./...
+console-build: ## 构建 Console
+	cd $(CONSOLE_DIR) && npm run build
 
-.PHONY: backend-test-coverage
-backend-test-coverage: ## 运行后端测试并生成覆盖率报告
-	cd backend && go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
-	cd backend && go tool cover -html=coverage.out -o coverage.html
-	@echo "覆盖率报告已生成：backend/coverage.html"
+console-lint: ## 检查 Console 代码
+	cd $(CONSOLE_DIR) && npm run lint
 
-.PHONY: backend-lint
-backend-lint: ## 运行后端代码检查
-	cd backend && go vet ./...
-	cd backend && go fmt ./...
+.PHONY: run test lint build clean
+run: db-up ## 启动本地数据库、Control Plane 和 Console
+	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup"; exit 1; }; . ./.env; set +a; (cd $(CONTROL_PLANE_DIR) && go run ./cmd/certflow) &
+	@cd $(CONSOLE_DIR) && npm run dev
 
-.PHONY: frontend-dev
-frontend-dev: ## 运行前端开发服务器
-	cd frontend && npm run dev
+test: control-plane-test ## 运行当前自动化测试
 
-.PHONY: frontend-build
-frontend-build: ## 构建前端生产版本
-	cd frontend && npm run build
+lint: control-plane-lint console-lint ## 运行所有静态检查
 
-.PHONY: frontend-lint
-frontend-lint: ## 运行前端代码检查
-	cd frontend && npm run lint
+build: control-plane-build console-build ## 构建所有可发布应用
 
-.PHONY: run
-run: db-up ## 启动完整开发环境（数据库+后端+前端）
-	@echo "启动后端服务..."
-	@set -a; [ -f .env ] || { echo "缺少 .env，请先运行 make setup 并填写配置"; exit 1; }; . ./.env; set +a; (cd backend && go run ./cmd/certflow) &
-	@echo "等待后端启动..."
-	@sleep 3
-	@echo "启动前端服务..."
-	@cd frontend && npm run dev
+clean: ## 清理本地构建产物
+	rm -f $(CONTROL_PLANE_DIR)/certflow $(CONTROL_PLANE_DIR)/dbinit
+	rm -f $(CONTROL_PLANE_DIR)/coverage.out $(CONTROL_PLANE_DIR)/coverage.html
+	rm -rf $(CONSOLE_DIR)/.next $(CONSOLE_DIR)/out
 
-.PHONY: test
-test: backend-test ## 运行所有测试
-	@echo "所有测试完成"
+.PHONY: docker-build docker-up docker-down docker-logs
+docker-build: ## 构建本地 Docker 镜像
+	$(COMPOSE_DEV) build
 
-.PHONY: lint
-lint: backend-lint frontend-lint ## 运行所有代码检查
+docker-up: ## 启动本地 Docker 开发环境
+	$(COMPOSE_DEV) up -d
 
-.PHONY: build
-build: backend-build frontend-build ## 构建所有组件
+docker-down: ## 停止本地 Docker 开发环境
+	$(COMPOSE_DEV) down
 
-.PHONY: clean
-clean: ## 清理构建文件
-	rm -f backend/certflow backend/dbinit
-	rm -f backend/coverage.out backend/coverage.html
-	rm -rf frontend/.next
-	rm -rf frontend/out
+docker-logs: ## 查看本地 Docker 日志
+	$(COMPOSE_DEV) logs -f
 
-.PHONY: docker-build
-docker-build: ## 构建 Docker 镜像
-	docker compose build
-
-.PHONY: docker-up
-docker-up: ## 启动所有 Docker 服务
-	docker compose up -d
-
-.PHONY: docker-down
-docker-down: ## 停止所有 Docker 服务
-	docker compose down
-
-.PHONY: docker-logs
-docker-logs: ## 查看 Docker 日志
-	docker compose logs -f
-
-.PHONY: gen-key
-gen-key: ## 生成加密密钥
-	@echo "生成新的加密密钥..."
+.PHONY: gen-key security-check deps-update format
+gen-key: ## 生成 Base64 格式加密密钥
 	@openssl rand -base64 32
 
-.PHONY: security-check
-security-check: ## 检查安全问题
-	@echo "检查 Go 依赖漏洞..."
-	cd backend && go list -json -m all | docker run --rm -i sonatypecommunity/nancy:latest sleuth
-	@echo "检查 npm 依赖漏洞..."
-	cd frontend && npm audit
+security-check: ## 检查依赖安全问题
+	cd $(CONTROL_PLANE_DIR) && go list -json -m all | docker run --rm -i sonatypecommunity/nancy:latest sleuth
+	cd $(CONSOLE_DIR) && npm audit
 
-.PHONY: deps-update
-deps-update: ## 更新依赖
-	cd backend && go get -u ./...
-	cd backend && go mod tidy
-	cd frontend && npm update
+deps-update: ## 更新应用依赖
+	cd $(CONTROL_PLANE_DIR) && go get -u ./... && go mod tidy
+	cd $(CONSOLE_DIR) && npm update
 
-.PHONY: format
-format: ## 格式化代码
-	cd backend && go fmt ./...
-	cd frontend && npm run format || true
+format: ## 格式化 Go 代码
+	cd $(CONTROL_PLANE_DIR) && go fmt ./...
+
+# 旧命令兼容别名，将在后续主版本移除。
+.PHONY: backend-run backend-build backend-test backend-test-coverage backend-lint frontend-dev frontend-build frontend-lint
+backend-run: control-plane-run
+backend-build: control-plane-build
+backend-test: control-plane-test
+backend-test-coverage: control-plane-test-coverage
+backend-lint: control-plane-lint
+frontend-dev: console-dev
+frontend-build: console-build
+frontend-lint: console-lint
 
 .DEFAULT_GOAL := help

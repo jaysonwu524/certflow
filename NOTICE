@@ -32,5 +32,5 @@ Frontend (Next.js/React):
 - Other JavaScript dependencies as listed in package.json
 
 For a complete list of dependencies and their licenses, please refer to:
-- backend/go.mod and backend/go.sum
-- frontend/package.json and frontend/package-lock.json
+- apps/control-plane/go.mod and apps/control-plane/go.sum
+- apps/console/package.json and apps/console/package-lock.json

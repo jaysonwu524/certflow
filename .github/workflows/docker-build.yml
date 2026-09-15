@@ -1,104 +1,133 @@
-name: Docker Build
+name: CertFlow CI and Docker publish
 
 on:
   push:
-    branches: [ main ]
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "apps/control-plane/**"
+      - "apps/console/**"
+      - "deploy/compose/**"
+      - "go.work"
+      - ".github/workflows/docker-build.yml"
   pull_request:
-    branches: [ main ]
+    branches: [main]
+    paths:
+      - "apps/control-plane/**"
+      - "apps/console/**"
+      - "deploy/compose/**"
+      - "go.work"
+      - ".github/workflows/docker-build.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: certflow-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  CONTROL_PLANE_IMAGE: ghcr.io/${{ github.repository_owner }}/certflow-control-plane
+  CONSOLE_IMAGE: ghcr.io/${{ github.repository_owner }}/certflow-console
 
 jobs:
-  build-backend:
-    name: Build Backend Image
+  test:
+    name: Test and validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/control-plane/go.mod
+          cache: true
+
+      - name: Go tests and vet
+        working-directory: apps/control-plane
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/console/package-lock.json
+
+      - name: Frontend lint and build
+        working-directory: apps/console
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Validate production Compose
+        run: |
+          docker compose --env-file .env.production.example -f deploy/compose/docker-compose.prod.yml config
+          docker compose --env-file .env.production.external-db.example -f deploy/compose/docker-compose.prod.yml -f deploy/compose/docker-compose.external-db.yml config
+
+  publish:
+    name: Publish images to GHCR
+    if: github.event_name != 'pull_request'
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Log in to Container Registry
-      if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-backend
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
-          type=sha
+      - name: Docker metadata (control plane)
+        id: control-plane-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.CONTROL_PLANE_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=tag
 
-    - name: Build and push
-      uses: docker/build-push-action@v5
-      with:
-        context: ./backend
-        push: ${{ github.event_name != 'pull_request' }}
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+      - name: Docker metadata (console)
+        id: console-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.CONSOLE_IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=ref,event=tag
 
-  build-frontend:
-    name: Build Frontend Image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+      - name: Build and push control plane
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/control-plane
+          file: ./apps/control-plane/Dockerfile
+          push: true
+          tags: ${{ steps.control-plane-meta.outputs.tags }}
+          labels: ${{ steps.control-plane-meta.outputs.labels }}
+          cache-from: type=gha,scope=control-plane
+          cache-to: type=gha,mode=max,scope=control-plane
 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Container Registry
-      if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-frontend
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
-          type=sha
-
-    - name: Build and push
-      uses: docker/build-push-action@v5
-      with:
-        context: ./frontend
-        push: ${{ github.event_name != 'pull_request' }}
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+      - name: Build and push console
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/console
+          file: ./apps/console/Dockerfile
+          push: true
+          tags: ${{ steps.console-meta.outputs.tags }}
+          labels: ${{ steps.console-meta.outputs.labels }}
+          cache-from: type=gha,scope=console
+          cache-to: type=gha,mode=max,scope=console

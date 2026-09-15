@@ -20,13 +20,13 @@ Thumbs.db
 # Environment Variables
 .env
 !.env.example
-.env.local
-.env.*.local
+.env.*
+!.env.*.example
 *.secret
 
-# Backend - Go
-backend/certflow
-backend/dbinit
+# Control plane - Go
+apps/control-plane/certflow
+apps/control-plane/dbinit
 *.exe
 *.dll
 *.so
@@ -35,14 +35,14 @@ backend/dbinit
 *.out
 vendor/
 
-# Frontend - Next.js
-frontend/.next
-frontend/out
-frontend/node_modules
-frontend/.env.local
-frontend/.env.development.local
-frontend/.env.test.local
-frontend/.env.production.local
+# Console - Next.js
+apps/console/.next
+apps/console/out
+apps/console/node_modules
+apps/console/.env.local
+apps/console/.env.development.local
+apps/console/.env.test.local
+apps/console/.env.production.local
 
 # Logs
 *.log

@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - certflow-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  control-plane:
+    image: ${CERTFLOW_CONTROL_PLANE_IMAGE:?CERTFLOW_CONTROL_PLANE_IMAGE is required}
+    restart: unless-stopped
+    environment:
+      # An external PostgreSQL URL takes precedence when supplied. The default
+      # targets the bundled postgres service for a self-contained deployment.
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable}
+      CERTFLOW_ADDR: :8080
+      CERTFLOW_ENCRYPTION_KEY: ${CERTFLOW_ENCRYPTION_KEY:?CERTFLOW_ENCRYPTION_KEY is required}
+      CERTFLOW_ADMIN_EMAIL: ${CERTFLOW_ADMIN_EMAIL:?CERTFLOW_ADMIN_EMAIL is required}
+      CERTFLOW_ADMIN_PASSWORD: ${CERTFLOW_ADMIN_PASSWORD:?CERTFLOW_ADMIN_PASSWORD is required}
+      CERTFLOW_SESSION_TTL_HOURS: ${CERTFLOW_SESSION_TTL_HOURS:-8}
+      CERTFLOW_SESSION_IDLE_MINUTES: ${CERTFLOW_SESSION_IDLE_MINUTES:-30}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8080"
+
+  console:
+    image: ${CERTFLOW_CONSOLE_IMAGE:?CERTFLOW_CONSOLE_IMAGE is required}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      CERTFLOW_API_URL: http://control-plane:8080
+    depends_on:
+      - control-plane
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  certflow-postgres:

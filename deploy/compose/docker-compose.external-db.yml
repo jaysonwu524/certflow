@@ -1,0 +1,10 @@
+services:
+  # Use this override with a managed PostgreSQL service such as Alibaba Cloud
+  # RDS. The base Compose file remains self-contained for single-server use.
+  postgres:
+    profiles: ["bundled-postgres"]
+
+  control-plane:
+    depends_on: !reset []
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required for external PostgreSQL}

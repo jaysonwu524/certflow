@@ -59,13 +59,13 @@
 
 3. 运行测试：
    ```bash
-   # 后端测试
-   cd backend
+   # Control Plane 测试
+   cd apps/control-plane
    go test ./...
    go vet ./...
    
-   # 前端测试
-   cd ../frontend
+   # Console 测试
+   cd ../console
    npm run build
    npm run lint
    ```
@@ -129,8 +129,8 @@ docs: update installation guide
 
 ### 必需工具
 
-- Go 1.21+
-- Node.js 18+
+- Go 1.26+
+- Node.js 22+
 - Docker Desktop
 - PostgreSQL 16+
 
@@ -138,7 +138,7 @@ docs: update installation guide
 
 1. 启动 PostgreSQL：
    ```bash
-   docker compose up -d postgres
+   docker compose -f deploy/compose/docker-compose.yml up -d postgres
    ```
 
 2. 配置环境变量：
@@ -147,36 +147,36 @@ docs: update installation guide
    # 编辑 .env 添加必需配置
    ```
 
-3. 启动后端：
+3. 启动 Control Plane：
    ```bash
-   cd backend
+   cd apps/control-plane
    go run ./cmd/certflow
    ```
 
-4. 启动前端：
+4. 启动 Console：
    ```bash
-   cd frontend
+   cd apps/console
    npm install
    npm run dev
    ```
 
 ## 测试
 
-### 后端测试
+### Control Plane 测试
 
 ```bash
-cd backend
+cd apps/control-plane
 go test ./... -v
 go test ./... -race
 go test ./... -cover
 ```
 
-### 前端测试
+### Console 测试
 
 ```bash
-cd frontend
+cd apps/console
 npm run build
-npm run type-check
+npx tsc --noEmit
 ```
 
 ## 文档
@@ -184,7 +184,6 @@ npm run type-check
 如果你的更改影响用户使用，请更新相应文档：
 
 - `README.md` - 项目概览和快速开始
-- `DESIGN.md` - 架构设计
 - `docs/` - 详细文档
 
 ## 许可证

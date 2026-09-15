@@ -1,0 +1,115 @@
+name: Control Plane CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'apps/control-plane/**'
+      - 'go.work'
+      - '.github/workflows/control-plane-ci.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'apps/control-plane/**'
+      - 'go.work'
+      - '.github/workflows/control-plane-ci.yml'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: certflow_test
+          POSTGRES_USER: certflow
+          POSTGRES_PASSWORD: certflow
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: apps/control-plane/go.mod
+        cache-dependency-path: apps/control-plane/go.sum
+
+    - name: Install dependencies
+      working-directory: ./apps/control-plane
+      run: go mod download
+
+    - name: Run go vet
+      working-directory: ./apps/control-plane
+      run: go vet ./...
+
+    - name: Run tests
+      working-directory: ./apps/control-plane
+      env:
+        DATABASE_URL: postgres://certflow:certflow@localhost:5432/certflow_test?sslmode=disable
+        CERTFLOW_ENCRYPTION_KEY: dGVzdC1lbmNyeXB0aW9uLWtleS0zMi1ieXRlcwo=
+      run: |
+        go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./apps/control-plane/coverage.out
+        flags: control-plane
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: apps/control-plane/go.mod
+        cache-dependency-path: apps/control-plane/go.sum
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+        working-directory: apps/control-plane
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: apps/control-plane/go.mod
+        cache-dependency-path: apps/control-plane/go.sum
+
+    - name: Build
+      working-directory: ./apps/control-plane
+      run: |
+        go build -v -o certflow ./cmd/certflow
+        go build -v -o dbinit ./cmd/dbinit
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: control-plane-binaries
+        path: |
+          apps/control-plane/certflow
+          apps/control-plane/dbinit
