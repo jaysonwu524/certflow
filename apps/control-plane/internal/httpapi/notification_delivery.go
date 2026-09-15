@@ -315,7 +315,7 @@ func postWebhook(ctx context.Context, target string, event domain.RealtimeEvent)
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return fmt.Errorf("webhook returned HTTP %d", response.StatusCode)
 	}

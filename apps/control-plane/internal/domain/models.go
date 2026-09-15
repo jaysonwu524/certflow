@@ -145,7 +145,8 @@ type CreateCloudCredentialInput struct {
 	Description string                 `json:"description"`
 	Provider    string                 `json:"provider"`    // Cloud provider: aliyun, aws, tencentcloud, etc.
 	Credentials map[string]interface{} `json:"credentials"` // Provider-specific credentials
-	// Deprecated: Use Credentials map instead
+	// Legacy wire fields are accepted for compatibility with earlier Console clients.
+	// New callers must use the provider-specific Credentials map.
 	AccessKeyID     string `json:"accessKeyId,omitempty"`
 	AccessKeySecret string `json:"accessKeySecret,omitempty"`
 }

@@ -76,7 +76,7 @@ func (c *Client) Call(ctx context.Context, endpoint, version, action string, cre
 	if err != nil {
 		return &Error{Code: "api_unavailable", Message: "Aliyun API request failed"}
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return &Error{Code: "api_unavailable", Message: "could not read Aliyun API response"}

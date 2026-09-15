@@ -52,7 +52,7 @@ func (s *Store) EnsureBootstrapAdmin(ctx context.Context, email, password string
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var adminID string
 	err = tx.QueryRow(ctx, `SELECT id FROM users WHERE role = 'admin' AND deleted_at IS NULL ORDER BY created_at LIMIT 1`).Scan(&adminID)
@@ -137,7 +137,7 @@ func (s *Store) ConsumeVerificationCode(ctx context.Context, email, purpose, cod
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var codeID, codeHash string
 	var expiresAt time.Time
 	var attempts int
@@ -334,7 +334,7 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token string, ttl time.D
 	if err != nil {
 		return RefreshSession{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var user User
 	var persistent bool
 	err = tx.QueryRow(ctx, `

@@ -25,6 +25,8 @@ ghcr.io/jaysonwu524/certflow-console:sha-<commit>
 
 推送 `v1.2.0` 这类 Git 标签会生成同名镜像标签。
 
+镜像以多架构 manifest 发布，支持 `linux/amd64` 与 `linux/arm64`。Docker 会在 x86 服务器、Apple Silicon 开发机或 ARM 云主机上自动选择匹配的镜像层，无需在 `.env.production` 中区分镜像名称。
+
 ## 自带 PostgreSQL 的首次部署
 
 确认 `main` 的 CI 已成功发布镜像后，在生产服务器执行：

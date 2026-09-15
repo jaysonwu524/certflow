@@ -1205,25 +1205,8 @@ func (s *Server) loadCloudProviderCredentials(ctx context.Context, credentialID 
 	return provider, credentials, material, nil
 }
 
-func (s *Server) verifyCloudCredentialForOperation(w http.ResponseWriter, r *http.Request, credentialID string) bool {
-	provider, credentials, material, err := s.loadCloudProviderCredentials(r.Context(), credentialID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "cloud_credential_not_found", "cloud credential was not found")
-		return false
-	}
-	if err != nil || material.Status != "active" {
-		writeError(w, http.StatusUnprocessableEntity, "cloud_credential_unavailable", "cloud credential is unavailable")
-		return false
-	}
-	if err := provider.VerifyCredentials(r.Context(), credentials); err != nil {
-		_, _ = s.store.RecordCloudCredentialVerification(r.Context(), credentialID, false, err.Error())
-		writeError(w, http.StatusUnprocessableEntity, "cloud_credential_verification_failed", safeProviderError(err))
-		return false
-	}
-	_, _ = s.store.RecordCloudCredentialVerification(r.Context(), credentialID, true, "")
-	return true
-}
-
+// safeProviderError returns a provider message only when it is safe to expose
+// to an operator; generic transport errors must not reveal credential details.
 func safeProviderError(err error) string {
 	var providerErr *aliyunrpc.Error
 	if errors.As(err, &providerErr) {
@@ -1358,15 +1341,6 @@ func isAliyunPermissionError(code string) bool {
 		strings.Contains(code, "permission") ||
 		strings.Contains(code, "unauthorized") ||
 		strings.Contains(code, "accessdenied")
-}
-
-func writeDNSAliyunError(w http.ResponseWriter, err error) {
-	var provider *dnsaliyun.Error
-	if errors.As(err, &provider) {
-		writeError(w, http.StatusUnprocessableEntity, "aliyun_"+provider.Code, provider.Message)
-		return
-	}
-	writeError(w, http.StatusBadGateway, "aliyun_unavailable", "Aliyun DNS API is unavailable")
 }
 
 func writeDNSProviderError(w http.ResponseWriter, err error) {
@@ -1824,14 +1798,6 @@ func normalizeZones(zones []string) []string {
 
 func validZone(zone string) bool {
 	return strings.Contains(zone, ".") && !strings.ContainsAny(zone, "* /\\")
-}
-
-func credentialHint(accessKeyID string) string {
-	trimmed := strings.TrimSpace(accessKeyID)
-	if len(trimmed) <= 4 {
-		return "****"
-	}
-	return "****" + trimmed[len(trimmed)-4:]
 }
 
 func validateCertificate(input domain.CreateCertificateInput) error {

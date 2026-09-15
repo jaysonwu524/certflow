@@ -4,8 +4,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Button, Checkbox, Dropdown, Input, Label, Tabs, TextField } from "@heroui/react";
-import { Eye, EyeOff, KeyRound, Languages, Mail, ShieldCheck } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Languages, Mail } from "lucide-react";
 import { useLocale } from "@/components/providers/locale-provider";
+import { BrandLogo } from "@/components/ui/brand-logo";
 
 type AuthMode = "password" | "code";
 const lastLoginEmailKey = "certflow.lastLoginEmail";
@@ -140,10 +141,7 @@ function useVerificationCooldown() {
 function AuthBrand() {
   return (
     <div className="auth-brand">
-      <span className="brand-mark" aria-hidden="true">
-        <ShieldCheck size={20} />
-      </span>
-      <span>CertFlow</span>
+      <BrandLogo variant="auth" priority />
     </div>
   );
 }

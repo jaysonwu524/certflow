@@ -268,7 +268,7 @@ func (c *Client) call(ctx context.Context, credentials Credentials, action strin
 	if err != nil {
 		return &Error{Code: "dns_api_unavailable", Message: "Aliyun DNS API request failed"}
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return &Error{Code: "dns_api_unavailable", Message: "could not read Aliyun DNS API response"}

@@ -139,7 +139,7 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		cursor = latest
 	}
-	fmt.Fprint(w, ": connected\n\n")
+	_, _ = fmt.Fprint(w, ": connected\n\n")
 	flusher.Flush()
 
 	heartbeat := time.NewTicker(realtimeHeartbeatInterval)
@@ -158,7 +158,7 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			cursor = event.ID
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprint(w, ": heartbeat\n\n")
+			_, _ = fmt.Fprint(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}
 	}
@@ -181,5 +181,5 @@ func writeRealtimeEvent(w http.ResponseWriter, event domain.RealtimeEvent) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(w, "id: %d\nevent: update\ndata: %s\n\n", event.ID, payload)
+	_, _ = fmt.Fprintf(w, "id: %d\nevent: update\ndata: %s\n\n", event.ID, payload)
 }

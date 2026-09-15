@@ -4,6 +4,9 @@ import type { NextRequest } from "next/server";
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const signedIn = Boolean(request.cookies.get("certflow_session")?.value);
+  // Public assets must bypass session routing. Without this, public/ images
+  // such as the product logo are redirected to login before the browser can render them.
+  if (/\.[a-z0-9]+$/i.test(pathname)) return NextResponse.next();
   // A cookie's presence is only an optimistic check. Let the login page load
   // even with an expired cookie so a fresh login can replace it.
   // The product site is intentionally public. All console routes still require

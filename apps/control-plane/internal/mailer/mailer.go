@@ -63,7 +63,7 @@ func Send(ctx context.Context, settings store.SMTPSettings, to, subject, body st
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if err := conn.SetDeadline(deadline); err != nil {
 		return err
 	}
@@ -71,7 +71,7 @@ func Send(ctx context.Context, settings store.SMTPSettings, to, subject, body st
 	if err != nil {
 		return err
 	}
-	defer client.Quit()
+	defer func() { _ = client.Quit() }()
 	if strings.EqualFold(settings.EncryptType, "STARTTLS") {
 		if ok, _ := client.Extension("STARTTLS"); !ok {
 			return fmt.Errorf("SMTP server does not support STARTTLS")

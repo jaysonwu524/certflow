@@ -35,10 +35,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: apps/control-plane/go.mod
           cache: true
@@ -50,7 +50,7 @@ jobs:
           go vet ./...
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -78,7 +78,10 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -115,6 +118,7 @@ jobs:
         with:
           context: ./apps/control-plane
           file: ./apps/control-plane/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.control-plane-meta.outputs.tags }}
           labels: ${{ steps.control-plane-meta.outputs.labels }}
@@ -126,6 +130,7 @@ jobs:
         with:
           context: ./apps/console
           file: ./apps/console/Dockerfile
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.console-meta.outputs.tags }}
           labels: ${{ steps.console-meta.outputs.labels }}

@@ -8,6 +8,7 @@ import { MarketingConsolePreview } from "@/components/marketing/marketing-consol
 import { MarketingHeroPreviewMotion, MarketingReveal } from "@/components/marketing/marketing-motion";
 import { MarketingWorkflow } from "@/components/marketing/marketing-workflow";
 import { useLocale, type Locale } from "@/components/providers/locale-provider";
+import { BrandLogo } from "@/components/ui/brand-logo";
 import {
   documentationUrl,
   licenseUrl,
@@ -28,10 +29,7 @@ function MarketingHeader() {
     <header className="marketing-header">
       <div className="marketing-container marketing-nav">
         <Link className="marketing-brand" href="/" aria-label="CertFlow home">
-          <span className="marketing-brand-mark">
-            <ShieldCheck size={20} strokeWidth={2.2} />
-          </span>
-          <span>CertFlow</span>
+          <BrandLogo variant="marketing" priority />
         </Link>
         <nav className="marketing-nav-links" aria-label="Product navigation">
           <a href="#capabilities">{copy.nav.capabilities}</a>
@@ -197,7 +195,7 @@ export function MarketingHome() {
       <footer className="marketing-footer">
         <div className="marketing-container">
           <div>
-            <span>CertFlow</span>
+            <BrandLogo variant="footer" />
             <span>{copy.footer.description}</span>
           </div>
           <nav aria-label="Footer navigation">

@@ -746,7 +746,7 @@ func (s *Store) QueueCertificateIssue(ctx context.Context, certificateID string)
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	owner := ownerID(ctx)
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM certificates WHERE id = $1 AND deleted_at IS NULL AND ($2 = '' OR owner_user_id = $2::uuid))`, certificateID, owner).Scan(&exists); err != nil {
@@ -794,7 +794,7 @@ func (s *Store) UpdateCertificate(ctx context.Context, certificateID string, inp
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	owner := ownerID(ctx)
 	if err := validateCertificateReferences(ctx, tx, input, owner); err != nil {
 		return err
@@ -885,7 +885,7 @@ func (s *Store) CreateCertificate(ctx context.Context, input domain.CreateCertif
 	if err != nil {
 		return "", err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if err := validateCertificateReferences(ctx, tx, input, owner); err != nil {
 		return "", err
 	}
@@ -1056,7 +1056,7 @@ func (s *Store) UpdateAutomationTask(ctx context.Context, taskID string, input d
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	owner := ownerID(ctx)
 	result, err := tx.Exec(ctx, `UPDATE automation_tasks SET name = $2, certificate_id = $3, action_type = $4, interval_minutes = $5, cloud_credential_id = NULLIF($6, '')::uuid, enabled = $7, config_version = config_version + 1, updated_at = now() WHERE id = $1 AND deleted_at IS NULL AND ($8 = '' OR owner_user_id = $8::uuid)`, taskID, input.Name, input.CertificateID, input.ActionType, input.IntervalMinutes, input.CloudCredentialID, input.Enabled, owner)
 	if err != nil {
@@ -1097,7 +1097,7 @@ func (s *Store) DeleteAutomationTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `SELECT deployment_target_id::text FROM automation_task_targets WHERE automation_task_id = $1`, taskID)
 	if err != nil {
 		return err
@@ -1163,7 +1163,7 @@ func (s *Store) CreateAutomationTask(ctx context.Context, taskID string, input d
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if err := s.createAutomationTaskTx(ctx, tx, taskID, input); err != nil {
 		return err
 	}
@@ -1184,7 +1184,7 @@ func (s *Store) CreateAutomationTaskWithInlineTarget(ctx context.Context, taskID
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	owner := ownerID(ctx)
 	target := input.InlineDeploymentTarget
@@ -1291,7 +1291,7 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 	if err != nil {
 		return AutomationRunQueueResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var task AutomationTaskConfiguration
 	if err := tx.QueryRow(ctx, `SELECT id, certificate_id, action_type, COALESCE(cloud_credential_id::text, '') FROM automation_tasks WHERE id = $1 AND enabled AND deleted_at IS NULL AND ($2 = '' OR owner_user_id = $2::uuid) FOR UPDATE`, taskID, ownerID(ctx)).Scan(&task.ID, &task.CertificateID, &task.ActionType, &task.CloudCredentialID); err != nil {
@@ -1357,7 +1357,8 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 		return AutomationRunQueueResult{}, err
 	}
 
-	if task.ActionType == "renew_certificate" {
+	switch task.ActionType {
+	case "renew_certificate":
 		key := fmt.Sprintf("manual:%s:%s", taskID, id.New())
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
@@ -1365,14 +1366,14 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 		`, id.New(), taskID, key, task.CertificateID, taskID, runID); err != nil {
 			return AutomationRunQueueResult{}, err
 		}
-	} else if task.ActionType == "upload_ssl" {
+	case "upload_ssl":
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
 			VALUES ($1, 'upload', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'cloud_credential_id', $5::text), $7::uuid, $6::uuid, now(), 0, 5)
 		`, id.New(), task.ID, "manual:"+id.New(), task.CertificateID, task.CloudCredentialID, runID, task.ID); err != nil {
 			return AutomationRunQueueResult{}, err
 		}
-	} else {
+	case "deploy_alb":
 		for _, targetID := range targetIDs {
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
@@ -1381,6 +1382,8 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 				return AutomationRunQueueResult{}, err
 			}
 		}
+	default:
+		return AutomationRunQueueResult{}, fmt.Errorf("unsupported automation action %q", task.ActionType)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'queued', last_error = NULL, last_run_at = now(), updated_at = now() WHERE id = $1`, task.ID); err != nil {
 		return AutomationRunQueueResult{}, err
@@ -1389,11 +1392,6 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 		return AutomationRunQueueResult{}, err
 	}
 	return AutomationRunQueueResult{ID: runID, Status: "queued"}, nil
-}
-
-func (s *Store) markAutomationQueued(ctx context.Context, taskID string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE automation_tasks SET last_status = 'queued', last_error = NULL, last_run_at = now(), updated_at = now() WHERE id = $1`, taskID)
-	return err
 }
 
 func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
@@ -1425,11 +1423,11 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 			LIMIT 1
 		`).Scan(&taskID, &certificateID, &certificateVersionID, &interval)
 		if err == pgx.ErrNoRows {
-			tx.Rollback(ctx)
+			_ = tx.Rollback(ctx)
 			break
 		}
 		if err != nil {
-			tx.Rollback(ctx)
+			_ = tx.Rollback(ctx)
 			return 0, err
 		}
 
@@ -1438,14 +1436,14 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 			INSERT INTO automation_runs (id, automation_task_id, certificate_id, certificate_version_id, trigger_type, status, total_jobs)
 			VALUES ($1, $2::uuid, $3::uuid, $4::uuid, 'scheduler', 'queued', 1)
 		`, runID, taskID, certificateID, certificateVersionID); err != nil {
-			tx.Rollback(ctx)
+			_ = tx.Rollback(ctx)
 			return 0, err
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
 			VALUES ($1, 'renew', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'automation_task_id', $5::text), $5::uuid, $6::uuid, now(), 0, 5)
 		`, id.New(), taskID, "scheduler:"+taskID, "scheduler:"+id.New(), certificateID, taskID, runID); err != nil {
-			tx.Rollback(ctx)
+			_ = tx.Rollback(ctx)
 			return 0, err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -1454,7 +1452,7 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 				next_run_at = now() + ($2 * interval '1 minute'), updated_at = now()
 			WHERE id = $1
 		`, taskID, interval); err != nil {
-			tx.Rollback(ctx)
+			_ = tx.Rollback(ctx)
 			return 0, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1463,32 +1461,6 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 		queued++
 	}
 	return queued, nil
-}
-
-func (s *Store) queueUpload(ctx context.Context, taskID, certificateID, credentialID, versionID string, manual bool) error {
-	key := versionID
-	if manual {
-		key = "manual:" + id.New()
-	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, next_run_at, attempt, max_attempts)
-		VALUES ($1, 'upload', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'cloud_credential_id', $5::text), $6::uuid, now(), 0, 5)
-		ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
-	`, id.New(), taskID, key, certificateID, credentialID, taskID)
-	return err
-}
-
-func (s *Store) queueAutomationDeployment(ctx context.Context, taskID, certificateID, targetID, versionID string, manual bool) error {
-	key := versionID + ":" + targetID
-	if manual {
-		key = "manual:" + id.New()
-	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, next_run_at, attempt, max_attempts)
-		VALUES ($1, 'deploy', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'deployment_target_id', $5::text), $6::uuid, now(), 0, 5)
-		ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
-	`, id.New(), taskID, key, certificateID, targetID, taskID)
-	return err
 }
 
 func (s *Store) SaveManualChallenge(ctx context.Context, challenge ManualChallenge) error {
@@ -1534,7 +1506,7 @@ func (s *Store) ApproveManualChallenge(ctx context.Context, certificateID string
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	var jobID string
 	if err := tx.QueryRow(ctx, `SELECT m.job_id FROM manual_validation_challenges m WHERE m.certificate_id = $1 AND m.status = 'waiting_user' AND ($2 = '' OR EXISTS (SELECT 1 FROM certificates c WHERE c.id = m.certificate_id AND c.owner_user_id = $2::uuid)) ORDER BY m.created_at DESC LIMIT 1 FOR UPDATE`, certificateID, ownerID(ctx)).Scan(&jobID); err != nil {
 		return err
@@ -1553,7 +1525,7 @@ func (s *Store) MarkJobWaitingUser(ctx context.Context, job ClaimedJob, workerID
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `UPDATE jobs SET status = 'waiting_user', lease_owner = NULL, lease_expires_at = NULL, updated_at = now() WHERE id = $1 AND status = 'running' AND lease_owner = $2`, job.ID, workerID); err != nil {
 		return err
 	}
@@ -1603,7 +1575,7 @@ func (s *Store) CreateCloudCredential(ctx context.Context, credentialID, version
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Use provider from input, default to 'aliyun' for backward compatibility
 	provider := input.Provider
@@ -1701,7 +1673,7 @@ func (s *Store) UpdateCloudCredential(ctx context.Context, credentialID, version
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	owner := ownerID(ctx)
 	result, err := tx.Exec(ctx, `
@@ -2347,7 +2319,7 @@ func (s *Store) SaveCertificateVersion(ctx context.Context, material Certificate
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO certificate_versions (
 			id, certificate_id, issued_by_execution_id, certificate_ciphertext, private_key_ciphertext, chain_ciphertext,
@@ -2494,7 +2466,7 @@ func (s *Store) QueueDueRenewals(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx, `
 		SELECT c.id, c.current_certificate_version_id, v.not_after
@@ -2574,7 +2546,7 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, retryDelay time.Duration
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx, `
 		SELECT id, kind, COALESCE(payload->>'certificate_id', ''), attempt, max_attempts
@@ -2683,7 +2655,7 @@ func (s *Store) ClaimJob(ctx context.Context, workerID string, leaseDuration tim
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var job ClaimedJob
 	err = tx.QueryRow(ctx, `
@@ -2778,7 +2750,7 @@ func (s *Store) CompleteJob(ctx context.Context, job ClaimedJob, workerID string
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	result, err := tx.Exec(ctx, `
 		UPDATE jobs SET status = 'succeeded', lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
@@ -2872,7 +2844,7 @@ func (s *Store) FailJob(ctx context.Context, job ClaimedJob, workerID string, fa
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	result, err := tx.Exec(ctx, `
 		UPDATE jobs SET lease_owner = NULL, lease_expires_at = NULL, updated_at = now(),

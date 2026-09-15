@@ -27,6 +27,7 @@ import { useRouter } from "next/navigation";
 import { useTheme } from "@/components/providers/theme-provider";
 import { useLocale, type TranslationKey } from "@/components/providers/locale-provider";
 import { NotificationCenter } from "@/components/layout/notification-center";
+import { BrandLogo } from "@/components/ui/brand-logo";
 
 type NavigationItem = {
   href: string;
@@ -205,10 +206,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <aside className={`sidebar ${navOpen ? "mobile-nav-open" : ""}`}>
         <div className="sidebar-brand-row">
           <Link href="/dashboard" className="brand" aria-label="CertFlow 首页">
-            <span className="brand-mark">
-              <ShieldCheck size={20} strokeWidth={2.2} />
-            </span>
-            <span className="brand-name">CertFlow</span>
+            <BrandLogo priority />
           </Link>
           {!sidebarCollapsed ? (
             <Button

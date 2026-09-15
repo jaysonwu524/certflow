@@ -34,7 +34,9 @@ func (s *Store) Migrate(ctx context.Context, databaseURL string) error {
 	if _, err := lockConnection.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationAdvisoryLockID); err != nil {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
-	defer lockConnection.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationAdvisoryLockID)
+	defer func() {
+		_, _ = lockConnection.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, migrationAdvisoryLockID)
+	}()
 
 	if err := s.normalizeLegacyMigrationHistory(ctx); err != nil {
 		return err
@@ -45,27 +47,27 @@ func (s *Store) Migrate(ctx context.Context, databaseURL string) error {
 		return fmt.Errorf("open migration database: %w", err)
 	}
 	if err := database.PingContext(ctx); err != nil {
-		database.Close()
+		_ = database.Close()
 		return fmt.Errorf("ping migration database: %w", err)
 	}
 
 	databaseDriver, err := postgres.WithInstance(database, &postgres.Config{})
 	if err != nil {
-		database.Close()
+		_ = database.Close()
 		return fmt.Errorf("create PostgreSQL migration driver: %w", err)
 	}
 	sourceDriver, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {
-		databaseDriver.Close()
+		_ = databaseDriver.Close()
 		return fmt.Errorf("load embedded migrations: %w", err)
 	}
 	migration, err := migrate.NewWithInstance("iofs", sourceDriver, "postgres", databaseDriver)
 	if err != nil {
-		sourceDriver.Close()
-		databaseDriver.Close()
+		_ = sourceDriver.Close()
+		_ = databaseDriver.Close()
 		return fmt.Errorf("initialize migration runner: %w", err)
 	}
-	defer migration.Close()
+	defer func() { _, _ = migration.Close() }()
 
 	if err := migration.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("apply database migrations: %w", err)
@@ -112,7 +114,7 @@ func (s *Store) normalizeLegacyMigrationHistory(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("begin legacy migration ledger upgrade: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var currentVersion int
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&currentVersion); err != nil {

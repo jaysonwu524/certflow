@@ -50,6 +50,36 @@
   --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.24), 0 8px 20px rgba(0, 0, 0, 0.18);
 }
 
+/* Shared brand metrics for the single square product mark. */
+.certflow-logo {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+.certflow-logo-image {
+  width: 42px;
+  height: 42px;
+  display: block;
+  flex: 0 0 42px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+.certflow-logo-marketing .certflow-logo-image {
+  width: 40px;
+  height: 40px;
+  flex-basis: 40px;
+}
+.certflow-logo-auth .certflow-logo-image {
+  width: 72px;
+  height: 72px;
+  flex-basis: 72px;
+}
+.certflow-logo-footer .certflow-logo-image {
+  width: 36px;
+  height: 36px;
+  flex-basis: 36px;
+}
+
 [data-color-theme="blue"] {
   --accent: #2563eb;
   --accent-strong: #1d4ed8;
@@ -181,19 +211,6 @@ body {
 }
 .marketing-brand {
   flex: 0 0 auto;
-  gap: 10px;
-  color: var(--marketing-ink);
-  font-size: 18px;
-  font-weight: 750;
-}
-.marketing-brand-mark {
-  width: 31px;
-  height: 31px;
-  display: grid;
-  place-items: center;
-  border-radius: 7px;
-  color: var(--chrome-mark-text);
-  background: var(--chrome-mark);
 }
 .marketing-nav-links {
   display: flex;
@@ -1030,25 +1047,13 @@ a {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 30px;
-  padding: 0 10px 28px;
+  min-height: 42px;
+  padding: 0 10px 24px;
 }
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-.brand-mark {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border-radius: 7px;
-  color: var(--chrome-mark-text);
-  background: var(--chrome-mark);
+  line-height: 0;
 }
 .sidebar-toggle {
   flex: 0 0 auto;
@@ -3273,13 +3278,6 @@ a {
   flex-direction: column;
   min-height: calc(100dvh - clamp(64px, 12vw, 176px));
 }
-.auth-aside .auth-brand {
-  color: #f4faf6;
-}
-.auth-aside .brand-mark {
-  color: var(--chrome-mark-text);
-  background: var(--chrome-mark);
-}
 .auth-aside-copy {
   max-width: 420px;
   margin-top: clamp(96px, 18vh, 190px);
@@ -3344,9 +3342,6 @@ a {
 .auth-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 18px;
-  font-weight: 700;
 }
 .auth-panel h1 {
   margin: 4px 0 0;

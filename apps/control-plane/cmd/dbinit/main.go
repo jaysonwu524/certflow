@@ -31,7 +31,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("connect admin database: %v", err)
 	}
-	defer connection.Close(ctx)
+	defer func() { _ = connection.Close(ctx) }()
 
 	var exists bool
 	if err := connection.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, databaseName).Scan(&exists); err != nil {
