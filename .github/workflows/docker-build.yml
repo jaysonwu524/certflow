@@ -2,23 +2,7 @@ name: CertFlow CI and Docker publish
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-    paths:
-      - "apps/control-plane/**"
-      - "apps/console/**"
-      - "deploy/compose/**"
-      - "go.work"
-      - ".github/workflows/docker-build.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "apps/control-plane/**"
-      - "apps/console/**"
-      - "deploy/compose/**"
-      - "go.work"
-      - ".github/workflows/docker-build.yml"
-  workflow_dispatch:
 
 concurrency:
   group: certflow-ci-${{ github.ref }}
@@ -36,6 +20,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify release tag is on main
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -99,9 +90,8 @@ jobs:
         with:
           images: ${{ env.CONTROL_PLANE_IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
             type=ref,event=tag
+            type=raw,value=latest
 
       - name: Docker metadata (console)
         id: console-meta
@@ -109,9 +99,8 @@ jobs:
         with:
           images: ${{ env.CONSOLE_IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
             type=ref,event=tag
+            type=raw,value=latest
 
       - name: Build and push control plane
         uses: docker/build-push-action@v6

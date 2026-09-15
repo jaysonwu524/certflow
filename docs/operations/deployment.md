@@ -6,6 +6,8 @@ CertFlow 的 CI 与生产运行分离：GitHub Actions 只测试并发布 Docker
 
 ```text
 push main
+  -> GitHub Actions: Control Plane CI、Console CI（质量检查）
+打 v* Tag
   -> GitHub Actions: Control Plane test / vet、Console lint / build、Compose 校验
   -> GitHub Actions: 构建 Control Plane 与 Console 镜像
   -> GitHub Container Registry
@@ -14,22 +16,29 @@ push main
 
 工作流位于 `.github/workflows/docker-build.yml`。GitHub 仓库应在 `Settings -> Actions -> General` 开启 `Read and write permissions`，工作流使用自动提供的 `GITHUB_TOKEN` 写入 GHCR，不需要生产服务器 SSH 凭据。
 
-`main` 发布的镜像标签：
+推送版本 Tag（例如 `v0.2.0`）后，两个镜像会使用同一个版本标签：
 
 ```text
-ghcr.io/jaysonwu524/certflow-control-plane:latest
-ghcr.io/jaysonwu524/certflow-control-plane:sha-<commit>
-ghcr.io/jaysonwu524/certflow-console:latest
-ghcr.io/jaysonwu524/certflow-console:sha-<commit>
+ghcr.io/jaysonwu524/certflow-control-plane:v0.2.0
+ghcr.io/jaysonwu524/certflow-console:v0.2.0
 ```
 
-推送 `v1.2.0` 这类 Git 标签会生成同名镜像标签。
+发布工作流还会将同一版本同步标记为 `latest`，方便试用；生产环境建议固定使用版本标签。只有已经位于 `main` 历史中的提交才能通过发布校验：
+
+```bash
+git checkout main
+git pull origin main
+git tag -a v0.2.0 -m "CertFlow v0.2.0"
+git push origin v0.2.0
+```
+
+普通推送 `main` 不会发布 Docker 镜像。
 
 镜像以多架构 manifest 发布，支持 `linux/amd64` 与 `linux/arm64`。Docker 会在 x86 服务器、Apple Silicon 开发机或 ARM 云主机上自动选择匹配的镜像层，无需在 `.env.production` 中区分镜像名称。
 
 ## 自带 PostgreSQL 的首次部署
 
-确认 `main` 的 CI 已成功发布镜像后，在生产服务器执行：
+确认版本 Tag 的发布工作流已成功后，在生产服务器执行：
 
 ```bash
 sudo mkdir -p /opt/certflow
