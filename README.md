@@ -1,81 +1,118 @@
 # CertFlow
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Control Plane CI](https://github.com/jaysonwu524/certflow/actions/workflows/control-plane-ci.yml/badge.svg?branch=main)](https://github.com/jaysonwu524/certflow/actions/workflows/control-plane-ci.yml)
+[![Console CI](https://github.com/jaysonwu524/certflow/actions/workflows/console-ci.yml/badge.svg?branch=main)](https://github.com/jaysonwu524/certflow/actions/workflows/console-ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8.svg)](https://go.dev/)
+[![GHCR](https://img.shields.io/badge/images-GHCR-2496ED.svg)](https://github.com/jaysonwu524?tab=packages&repo_name=certflow)
 
-CertFlow 是一个以 Go 实现的 TLS 证书生命周期与部署自动化服务。它集中管理 ACME 账户、DNS 账户、云凭证、证书版本与自动化任务，并将证书安全地部署到阿里云 SSL 证书管理和 ALB。
+[English](./README.md) | [简体中文](./README.zh-CN.md)
 
-## 能力概览
+![CertFlow logo](./apps/console/public/brand/certflow-logo.jpg)
 
-- ACME DNS-01 签发，支持单域名、多 SAN 与通配符证书。
-- 自动 DNS 与手动 TXT 验证。
-- 阿里云 DNS、SSL 证书管理与 ALB HTTPS/QUIC 监听器集成。
-- 定期续期、SSL 上传、ALB 更新三类自动化任务。
-- 执行记录、SSE 实时状态、站内信、邮件和 Webhook 通知。
-- 管理员与普通用户隔离；私钥、AccessKey、SMTP 密码均加密保存。
-- Go Control Plane、Next.js + React + HeroUI 3 Console、PostgreSQL 持久化任务队列。
+**Open-source TLS certificate lifecycle automation for ACME, DNS, cloud certificate stores, and load balancers.**
 
-## 快速开始
+> CertFlow is currently an MVP / early-development project. Review the security, backup, and integration guidance before using it with production credentials or domains.
 
-### 本地开发
+## Why CertFlow
 
-```bash
-git clone https://github.com/jaysonwu524/certflow.git
-cd certflow
-make setup
+Certificate operations often span ACME accounts, DNS credentials, certificate stores, load balancers, renewal schedules, audit records, and failure notifications. CertFlow brings those steps into one auditable control plane while keeping private keys and cloud secrets encrypted at rest.
+
+## Capabilities
+
+| Capability | Status | Details |
+| --- | --- | --- |
+| Certificate issuance | Supported | ACME DNS-01, manual TXT validation, SAN and wildcard certificates |
+| Certificate lifecycle | Supported | Versioned certificates, renewal workflows, execution history |
+| Alibaba Cloud integration | Supported | DNS, SSL Certificate Management, ALB HTTPS/QUIC listeners |
+| Automation | Supported | Renewal, upload to SSL Certificate Management, ALB updates |
+| Notifications | Supported | SSE status updates, in-app messages, email, failure Webhooks |
+| Access control | Supported | Administrator and user roles with resource ownership checks |
+| Remote Agent | Planned | Independent execution plane for managed networks |
+| Other providers / OIDC | Planned | Extension points are reserved for future releases |
+
+## Architecture
+
+```mermaid
+flowchart LR
+  B[Browser] --> C[Console<br/>Next.js + React + HeroUI]
+  C --> P[Control Plane<br/>Go API + Scheduler + Workers]
+  P --> DB[(PostgreSQL)]
+  P --> E[ACME / DNS / Alibaba Cloud]
+  A[Future Agent<br/>independent Go module] -->|agent.v1 outbound protocol| P
 ```
 
-编辑 `.env`，至少设置 `CERTFLOW_ENCRYPTION_KEY`：
+The Console is a user interface and same-origin BFF. The Control Plane owns authentication, authorization, certificate issuance, external cloud operations, task execution, notifications, and database migrations. A future Agent will be independently deployed and must not access the Control Plane database or import its internal packages.
+
+## Quick Start
+
+The fastest self-hosted path uses the published GHCR images and bundled PostgreSQL. It does not require checking out the application source code on the production server.
+
+```bash
+mkdir -p /opt/certflow/deploy/compose
+cd /opt/certflow
+
+curl -fsSL https://raw.githubusercontent.com/jaysonwu524/certflow/main/deploy/compose/docker-compose.prod.yml \
+  -o deploy/compose/docker-compose.prod.yml
+curl -fsSL https://raw.githubusercontent.com/jaysonwu524/certflow/main/.env.production.example \
+  -o .env.production.example
+cp .env.production.example .env.production
+chmod 600 .env.production
+```
+
+Edit `.env.production` and replace the PostgreSQL password, administrator password, and encryption key. Generate the encryption key with:
 
 ```bash
 openssl rand -base64 32
 ```
 
-启动本地 PostgreSQL 与 Control Plane：
+Start CertFlow:
 
 ```bash
-make db-up
-make control-plane-run
+docker compose --env-file .env.production \
+  -f deploy/compose/docker-compose.prod.yml up -d
 ```
 
-另开一个终端启动 Console：
+Open the HTTPS hostname configured in your reverse proxy. The bundled Console listens on `127.0.0.1:3000`; PostgreSQL and the Control Plane port must not be exposed directly to the public internet. The Control Plane automatically applies embedded `golang-migrate` migrations and initializes the first administrator.
 
-```bash
-make console-dev
-```
+Forks or private deployments must replace the two `CERTFLOW_*_IMAGE` values with their own GHCR image names before starting.
 
-打开 `http://localhost:3000`。首次启动会创建 `.env` 中指定的管理员；开发环境默认账号为 `admin@localhost` / `admin`，请勿用于生产。
+For Alibaba Cloud RDS or another managed PostgreSQL service, use the external database Compose override described in the [deployment guide](./docs/operations/deployment.md).
 
-### Docker 开发环境
+## Deployment
 
-```bash
-CERTFLOW_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
-  docker compose -f deploy/compose/docker-compose.yml up -d --build
-```
+- [Bundled PostgreSQL, external PostgreSQL, GHCR publishing, upgrades, and rollback](./docs/operations/deployment.md)
+- [Environment variables, administrator initialization, and Secret handling](./docs/operations/configuration.md)
+- [PostgreSQL migrations, backups, and recovery](./docs/operations/database.md)
 
-## 文档
+## Product Documentation
 
-- [架构与核心模型](./docs/architecture/overview.md)
-- [证书生命周期与自动化](./docs/product/certificate-lifecycle.md)
-- [本地开发与测试](./docs/development/testing.md)
-- [Console 工程规范](./docs/development/console.md)
-- [部署、GHCR 与回滚](./docs/operations/deployment.md)
-- [PostgreSQL 与数据库迁移](./docs/operations/database.md)
-- [配置与 Secret 说明](./docs/operations/configuration.md)
-- [完整文档索引](./docs/README.md)
+### Use CertFlow
 
-## 验证
+- [Certificate lifecycle, SAN, wildcard, DNS validation, and automation](./docs/product/certificate-lifecycle.md)
+- [Architecture and domain model](./docs/architecture/overview.md)
 
-```bash
-make control-plane-test
-make console-lint
-make console-build
-```
+### Develop and Contribute
 
-## 贡献与安全
+- [Local development and testing](./docs/development/testing.md)
+- [Console engineering conventions](./docs/development/console.md)
+- [Project structure](./docs/development/project-structure.md)
+- [Contribution guide](./CONTRIBUTING.md)
 
-- [贡献指南](./CONTRIBUTING.md)
-- [安全策略](./SECURITY.md)
-- [变更日志](./CHANGELOG.md)
-- [行为准则](./CODE_OF_CONDUCT.md)
+### Security and Operations
 
-项目采用 [Apache License 2.0](./LICENSE)。
+- [Security policy](./SECURITY.md)
+- [Documentation index](./docs/README.md)
+
+## Roadmap
+
+- Independent remote Agent for private networks and managed hosts
+- Additional DNS, certificate store, and load balancer providers
+- OIDC / SSO and richer organization-level access control
+- OpenAPI-driven client generation and a versioned Agent protocol implementation
+
+## Community and License
+
+Bug reports and feature proposals are welcome through [GitHub Issues](https://github.com/jaysonwu524/certflow/issues). Please read the [contribution guide](./CONTRIBUTING.md) and [security policy](./SECURITY.md) before opening a report.
+
+CertFlow is licensed under the [Apache License 2.0](./LICENSE).
