@@ -106,7 +106,8 @@ MVP 页面与主要交互：
 
 | 路由 | 内容 |
 | --- | --- |
-| `/dashboard` | 证书总数、即将到期数、最近失败任务、近期执行动态 |
+| `/dashboard` | 普通用户的个人工作台；管理员可在“我的工作台”Tab 查看自身证书、自动化与执行动态 |
+| `/dashboard?view=system` | 仅管理员可见的系统总览：全局资源规模、风险证书、失败执行、自动化健康度与用户资源分布 |
 | `/cloud-credentials` | 阿里云凭证列表、创建、验证、启用与禁用；AccessKey 不可修改，仅展示非敏感标识 |
 | `/acme-accounts` | ACME 账户列表、创建、验证、禁用 |
 | `/dns-accounts` | DNS 账户列表、创建、凭证连通性验证、禁用 |
@@ -117,6 +118,8 @@ MVP 页面与主要交互：
 | `/executions` | 可按状态、任务类型、证书、部署目标、时间筛选的执行记录 |
 | `/executions/[id]` | 工作流步骤、耗时、脱敏错误和重试操作 |
 | `/notification-endpoints` | 失败 Webhook 的配置、启停与测试投递 |
+
+Dashboard API 契约按范围分离：`GET /api/v1/dashboard` 始终以当前登录用户为 owner scope；`GET /api/v1/admin/dashboard` 必须经过 `requireAdmin`，只返回全局聚合数据和脱敏的归属摘要。管理员正常访问资源管理列表时仍具有全局管理权限；仅个人工作台请求 `scope=mine`，避免将全局列表误呈现为个人数据。
 
 UI 行为约束：
 

@@ -69,6 +69,7 @@ func (s *Server) StopRealtimeStreams() {
 func (s *Server) Router() http.Handler {
 	router := chi.NewRouter()
 	router.Use(requestID)
+	router.Use(localizeErrors)
 	router.Use(recoverer)
 
 	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +100,7 @@ func (s *Server) Router() http.Handler {
 		api.Get("/profile/sessions", s.listProfileSessions)
 		api.Post("/profile/sessions/revoke-others", s.revokeOtherProfileSessions)
 		api.Get("/dashboard", s.dashboard)
+		api.Get("/admin/dashboard", s.adminDashboard)
 		api.Get("/cloud-credentials", s.listCloudCredentials)
 		api.Post("/cloud-credentials", s.createCloudCredential)
 		api.Get("/cloud-credentials/{credentialID}", s.getCloudCredential)
@@ -1021,7 +1023,7 @@ func (s *Server) runCertificateDeployment(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) listAutomations(w http.ResponseWriter, r *http.Request) {
-	tasks, err := s.store.ListAutomationTasks(r.Context())
+	tasks, err := s.store.ListAutomationTasks(personalScope(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "automations_unavailable", "could not load automation tasks")
 		return
@@ -1392,7 +1394,10 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	dashboard, err := s.store.Dashboard(r.Context())
+	// Dashboards are always personal. Administrators retain global management
+	// permissions elsewhere and use the dedicated admin overview for aggregates.
+	ctx := store.WithOwnerScope(r.Context(), actor(r).ID)
+	dashboard, err := s.store.Dashboard(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "dashboard_unavailable", "could not load dashboard")
 		return
@@ -1400,8 +1405,20 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dashboard)
 }
 
+func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
+	dashboard, err := s.store.AdminDashboard(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "admin_dashboard_unavailable", "could not load administrator dashboard")
+		return
+	}
+	writeJSON(w, http.StatusOK, dashboard)
+}
+
 func (s *Server) listCertificates(w http.ResponseWriter, r *http.Request) {
-	certificates, err := s.store.ListCertificates(r.Context())
+	certificates, err := s.store.ListCertificates(personalScope(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "certificates_unavailable", "could not load certificates")
 		return
@@ -1529,12 +1546,21 @@ func (s *Server) markNotificationsRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listExecutions(w http.ResponseWriter, r *http.Request) {
-	executions, err := s.store.ListExecutions(r.Context())
+	executions, err := s.store.ListExecutions(personalScope(r))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "executions_unavailable", "could not load executions")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": executions})
+}
+
+// personalScope is opt-in for administrator resource lists used by the
+// personal dashboard. Existing management lists remain global for admins.
+func personalScope(r *http.Request) context.Context {
+	if r.URL.Query().Get("scope") != "mine" {
+		return r.Context()
+	}
+	return store.WithOwnerScope(r.Context(), actor(r).ID)
 }
 
 func (s *Server) createCertificate(w http.ResponseWriter, r *http.Request) {
@@ -1832,7 +1858,36 @@ func validateCertificate(input domain.CreateCertificateInput) error {
 			return errors.New("domains must be valid FQDNs or single-label wildcards")
 		}
 	}
+	if redundant, wildcard := redundantExactDomain(input.Domains); redundant != "" {
+		return fmt.Errorf("domain %q is redundant because %q already covers it; remove the exact domain from this certificate request", redundant, wildcard)
+	}
 	return nil
+}
+
+// Let’s Encrypt rejects a request containing both an exact name and a
+// wildcard that covers that exact name. The apex is intentionally not treated
+// as redundant because *.example.com never covers example.com.
+func redundantExactDomain(domains []string) (string, string) {
+	wildcards := make(map[string]string, len(domains))
+	for _, domainName := range domains {
+		domainName = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domainName)), ".")
+		if strings.HasPrefix(domainName, "*.") {
+			wildcards[strings.TrimPrefix(domainName, "*.")] = domainName
+		}
+	}
+	for _, domainName := range domains {
+		domainName = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domainName)), ".")
+		if strings.HasPrefix(domainName, "*.") {
+			continue
+		}
+		labels := strings.Split(domainName, ".")
+		if len(labels) > 1 {
+			if wildcard, ok := wildcards[strings.Join(labels[1:], ".")]; ok {
+				return domainName, wildcard
+			}
+		}
+	}
+	return "", ""
 }
 
 func requestID(next http.Handler) http.Handler {

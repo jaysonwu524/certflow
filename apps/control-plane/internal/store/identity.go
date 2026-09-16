@@ -18,12 +18,22 @@ import (
 const maxCodeAttempts = 5
 
 type actorContextKey struct{}
+type ownerScopeContextKey struct{}
 
 func WithActor(ctx context.Context, actor Actor) context.Context {
 	return context.WithValue(ctx, actorContextKey{}, actor)
 }
 
+// WithOwnerScope keeps an administrator's personal read path explicitly
+// scoped without changing the administrator's normal global permissions.
+func WithOwnerScope(ctx context.Context, userID string) context.Context {
+	return context.WithValue(ctx, ownerScopeContextKey{}, userID)
+}
+
 func ownerID(ctx context.Context) string {
+	if owner, ok := ctx.Value(ownerScopeContextKey{}).(string); ok && owner != "" {
+		return owner
+	}
 	actor, _ := ctx.Value(actorContextKey{}).(Actor)
 	if actor.Role == "user" {
 		return actor.ID

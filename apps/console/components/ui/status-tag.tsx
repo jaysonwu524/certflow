@@ -1,28 +1,17 @@
 import { Tag, TagGroup } from "@heroui/react";
 import { useId } from "react";
+import { useLocale, type TranslationKey } from "@/components/providers/locale-provider";
 
-const labels: Record<string, string> = {
-  draft: "草稿",
-  pending: "待签发",
-  issuing: "签发中",
-  issued: "已签发",
-  renewing: "续期中",
-  failed: "失败",
-  expiring: "即将到期",
-  expired: "已过期",
-  revoked: "已撤销",
-  disabled: "已禁用",
-  queued: "排队中",
-  running: "执行中",
-  waiting_user: "等待确认",
-  succeeded: "成功",
-  cancelled: "已取消",
-  active: "正常",
-  invalid: "验证失败",
+const labelKeys: Record<string, TranslationKey> = {
+  draft: "status.draft", pending: "status.pending", issuing: "status.issuing", issued: "status.issued", renewing: "status.renewing",
+  failed: "status.failed", partial_failed: "status.partial_failed", expiring: "status.expiring", expired: "status.expired", revoked: "status.revoked",
+  disabled: "status.disabled", queued: "status.queued", running: "status.running", waiting_user: "status.waiting_user", succeeded: "status.succeeded",
+  cancelled: "status.cancelled", active: "status.active", invalid: "status.invalid",
 };
 
 export function StatusTag({ status }: { status: string }) {
-  const label = labels[status] ?? status;
+  const { t } = useLocale();
+  const label = t(labelKeys[status] ?? "status.unknown");
   const tagId = useId();
 
   return (

@@ -58,6 +58,9 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 	}); err != nil {
 		return err
 	}
+	if redundant, wildcard := redundantExactDomain(configuration.Domains); redundant != "" {
+		return job.Permanent("redundant_certificate_domain", fmt.Sprintf("domain %q is redundant because %q already covers it; edit the certificate and remove the exact domain", redundant, wildcard))
+	}
 
 	var accountKey crypto.Signer
 	var cloudCredential cloudCredentials
@@ -391,10 +394,60 @@ func classifyACMEError(err error) error {
 		return job.Retryable("acme_timeout", "ACME operation timed out", 0)
 	}
 	var providerError *acme.Error
-	if errors.As(err, &providerError) && (providerError.StatusCode == 429 || providerError.StatusCode >= 500) {
-		return job.Retryable("acme_unavailable", "ACME provider is temporarily unavailable", 0)
+	if errors.As(err, &providerError) {
+		if providerError.StatusCode == 429 || providerError.StatusCode >= 500 {
+			return job.Retryable("acme_unavailable", acmeErrorMessage(providerError, "ACME provider is temporarily unavailable"), 0)
+		}
+		return job.Permanent("acme_operation_failed", acmeErrorMessage(providerError, "ACME provider rejected the certificate request"))
 	}
 	return job.Permanent("acme_operation_failed", "ACME provider rejected the certificate request")
+}
+
+func redundantExactDomain(domains []string) (string, string) {
+	wildcards := make(map[string]string, len(domains))
+	for _, domainName := range domains {
+		domainName = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domainName)), ".")
+		if strings.HasPrefix(domainName, "*.") {
+			wildcards[strings.TrimPrefix(domainName, "*.")] = domainName
+		}
+	}
+	for _, domainName := range domains {
+		domainName = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domainName)), ".")
+		if strings.HasPrefix(domainName, "*.") {
+			continue
+		}
+		labels := strings.Split(domainName, ".")
+		if len(labels) > 1 {
+			if wildcard, ok := wildcards[strings.Join(labels[1:], ".")]; ok {
+				return domainName, wildcard
+			}
+		}
+	}
+	return "", ""
+}
+
+// ACME problem details are safe to expose after trimming provider boilerplate;
+// they identify DNS, CAA, rate-limit, and authorization failures without
+// including any CertFlow secrets.
+func acmeErrorMessage(providerError *acme.Error, fallback string) string {
+	if providerError == nil {
+		return fallback
+	}
+	detail := strings.TrimSpace(providerError.Detail)
+	problemType := strings.TrimSpace(providerError.ProblemType)
+	if detail == "" {
+		if problemType == "" {
+			return fallback
+		}
+		return fmt.Sprintf("ACME provider rejected the request (%s)", problemType)
+	}
+	if len(detail) > 500 {
+		detail = detail[:500]
+	}
+	if problemType == "" {
+		return detail
+	}
+	return fmt.Sprintf("%s: %s", problemType, detail)
 }
 
 func generateCertificateKey(algorithm string) (crypto.Signer, []byte, error) {

@@ -2,6 +2,7 @@
 
 import { Button, ButtonGroup, Dropdown } from "@heroui/react";
 import { Ellipsis } from "lucide-react";
+import { useLocale } from "@/components/providers/locale-provider";
 
 export type TableAction = {
   id: string;
@@ -16,6 +17,7 @@ export type TableAction = {
 // Tables use a compact action budget: the three most common commands remain
 // visible and lower-frequency or destructive commands are collected in More.
 export function TableActions({ actions }: { actions: TableAction[] }) {
+  const { t } = useLocale();
   const visibleActions = actions.slice(0, 3);
   const moreActions = actions.slice(3);
 
@@ -29,12 +31,12 @@ export function TableActions({ actions }: { actions: TableAction[] }) {
           onPress={action.onPress}
         >
           {index > 0 ? <ButtonGroup.Separator /> : null}
-          {action.isPending ? action.pendingLabel ?? `${action.label}中` : action.label}
+          {action.isPending ? (action.pendingLabel ?? `${action.label}中`) : action.label}
         </Button>
       ))}
       {moreActions.length > 0 ? (
         <Dropdown>
-          <Button isIconOnly aria-label="更多操作" size="sm" variant="tertiary">
+          <Button isIconOnly aria-label={t("common.moreActions")} size="sm" variant="tertiary">
             {visibleActions.length > 0 ? <ButtonGroup.Separator /> : null}
             <Ellipsis size={16} />
           </Button>

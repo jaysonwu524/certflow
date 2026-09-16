@@ -5,6 +5,60 @@ export type Dashboard = {
   failedExecutions: number;
 };
 
+export type CurrentUser = {
+  id: string;
+  email: string;
+  role: "admin" | "user";
+  status: string;
+};
+
+export type AdminDashboard = {
+  metrics: {
+    activeUsers: number;
+    newUsers30d: number;
+    certificatesTotal: number;
+    certificatesIssued: number;
+    certificatesExpiring7d: number;
+    certificatesExpiring30d: number;
+    jobsQueued: number;
+    jobsRunning: number;
+    failedExecutions24h: number;
+    executionFailureRate30d: number;
+    invalidCloudCredentials: number;
+    invalidDNSAccounts: number;
+    invalidACMEAccounts: number;
+    smtpConfigured: boolean;
+  };
+  executionTrend: Array<{ date: string; succeeded: number; failed: number; active: number }>;
+  expiryDistribution: Array<{ bucket: string; count: number }>;
+  automationHealth: { healthy: number; paused: number; attention: number };
+  riskCertificates: Array<{
+    id: string;
+    name: string;
+    ownerEmail: string;
+    status: string;
+    notAfter: string | null;
+    lastError: string;
+  }>;
+  failedExecutions: Array<{
+    id: string;
+    kind: string;
+    certificate: string;
+    ownerEmail: string;
+    startedAt: string | null;
+    errorCode: string;
+    error: string;
+  }>;
+  resourceOwners: Array<{
+    userId: string;
+    email: string;
+    certificateCount: number;
+    automationCount: number;
+    failedExecutions30d: number;
+    lastActiveAt: string | null;
+  }>;
+};
+
 export type Certificate = {
   id: string;
   name: string;
@@ -71,6 +125,7 @@ export type Execution = {
   target: string;
   startedAt: string | null;
   finishedAt: string | null;
+  errorCode: string;
   error: string;
 };
 
@@ -182,9 +237,10 @@ const apiBaseUrl = process.env.CERTFLOW_API_URL ?? "http://localhost:8080";
 async function apiGet<T>(path: string, fallback: T): Promise<{ data: T; unavailable: boolean }> {
   try {
     const cookie = (await cookies()).toString();
+    const locale = (await cookies()).get("certflow_locale")?.value === "en" ? "en" : "zh-CN";
     const response = await fetch(`${apiBaseUrl}/api/v1${path}`, {
       cache: "no-store",
-      headers: cookie ? { cookie } : {},
+      headers: { ...(cookie ? { cookie } : {}), "X-CertFlow-Locale": locale },
     });
     if (!response.ok) {
       return { data: fallback, unavailable: true };
@@ -204,13 +260,50 @@ export function getDashboard() {
   });
 }
 
-export async function getCertificates() {
-  const response = await apiGet<{ data: Certificate[] }>("/certificates", { data: [] });
+export function getCurrentUser() {
+  return apiGet<CurrentUser | null>("/auth/me", null);
+}
+
+export function getAdminDashboard() {
+  return apiGet<AdminDashboard>("/admin/dashboard", {
+    metrics: {
+      activeUsers: 0,
+      newUsers30d: 0,
+      certificatesTotal: 0,
+      certificatesIssued: 0,
+      certificatesExpiring7d: 0,
+      certificatesExpiring30d: 0,
+      jobsQueued: 0,
+      jobsRunning: 0,
+      failedExecutions24h: 0,
+      executionFailureRate30d: 0,
+      invalidCloudCredentials: 0,
+      invalidDNSAccounts: 0,
+      invalidACMEAccounts: 0,
+      smtpConfigured: false,
+    },
+    executionTrend: [],
+    expiryDistribution: [],
+    automationHealth: { healthy: 0, paused: 0, attention: 0 },
+    riskCertificates: [],
+    failedExecutions: [],
+    resourceOwners: [],
+  });
+}
+
+export async function getCertificates(scope?: "mine") {
+  const response = await apiGet<{ data: Certificate[] }>(
+    `/certificates${scope === "mine" ? "?scope=mine" : ""}`,
+    { data: [] },
+  );
   return { certificates: response.data.data, unavailable: response.unavailable };
 }
 
-export async function getExecutions() {
-  const response = await apiGet<{ data: Execution[] }>("/executions", { data: [] });
+export async function getExecutions(scope?: "mine") {
+  const response = await apiGet<{ data: Execution[] }>(
+    `/executions${scope === "mine" ? "?scope=mine" : ""}`,
+    { data: [] },
+  );
   return { executions: response.data.data, unavailable: response.unavailable };
 }
 
@@ -237,7 +330,9 @@ export function getCertificateDeployments() {
   return apiGet<{ data: CertificateDeployment[] }>("/certificate-deployments", { data: [] });
 }
 
-export function getAutomations() {
-  return apiGet<{ data: AutomationTask[] }>("/automations", { data: [] });
+export function getAutomations(scope?: "mine") {
+  return apiGet<{ data: AutomationTask[] }>(`/automations${scope === "mine" ? "?scope=mine" : ""}`, {
+    data: [],
+  });
 }
 import { cookies } from "next/headers";

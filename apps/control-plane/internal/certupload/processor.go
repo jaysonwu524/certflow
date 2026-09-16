@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/regenbio/certflow/apps/control-plane/internal/aliyunrpc"
@@ -126,11 +127,18 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 				}
 			}
 
+			// CAS names are immutable. Include the certificate version so a
+			// renewal creates a replacement resource, while retries for the same
+			// version still reuse the persisted remote ID above.
 			taskSuffix := "legacy"
 			if len(claimed.AutomationTaskID) >= 8 {
 				taskSuffix = claimed.AutomationTaskID[:8]
 			}
-			name := "certflow-" + configuration.CertificateID[:8] + "-" + taskSuffix
+			versionSuffix := configuration.CertificateVersionID
+			if len(versionSuffix) > 8 {
+				versionSuffix = versionSuffix[:8]
+			}
+			name := "certflow-" + configuration.CertificateID[:8] + "-" + taskSuffix + "-" + versionSuffix
 			remoteID, err = uploader.UploadCertificate(ctx, credentials, cloudprovider.UploadCertificateRequest{
 				Name:           name,
 				CertificatePEM: string(certificatePEM),
@@ -161,6 +169,11 @@ func (p *Processor) Handle(ctx context.Context, claimed store.ClaimedJob, report
 func classify(err error) error {
 	var provider *aliyunrpc.Error
 	if errors.As(err, &provider) {
+		providerCode := strings.ToLower(provider.Code)
+		providerMessage := strings.ToLower(provider.Message)
+		if (strings.Contains(providerCode, "name") || strings.Contains(providerMessage, "name") || strings.Contains(providerMessage, "名称")) && (strings.Contains(providerMessage, "duplicate") || strings.Contains(providerMessage, "exist") || strings.Contains(providerMessage, "重复")) {
+			return job.Permanent("aliyun_name_duplicate", "Aliyun certificate name already exists")
+		}
 		switch provider.Code {
 		case "api_unavailable", "serviceunavailable", "internalerror", "throttling":
 			return job.Retryable("aliyun_"+provider.Code, provider.Message, 0)
