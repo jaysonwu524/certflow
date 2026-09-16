@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"strings"
 	"testing"
 
 	"github.com/regenbio/certflow/apps/control-plane/internal/cloudprovider"
@@ -23,6 +24,16 @@ func TestValidateDNSAccountDescriptionLimit(t *testing.T) {
 	input := domain.CreateDNSAccountInput{Name: "dns", CloudCredentialID: "credential", AllowedZones: []string{"example.com"}, Description: string(make([]byte, 241))}
 	if err := validateDNSAccount(input); err == nil {
 		t.Fatal("expected an overlong DNS description to be rejected")
+	}
+}
+
+func TestValidateCertificateRejectsExactDomainCoveredByWildcard(t *testing.T) {
+	input := domain.CreateCertificateInput{
+		Name: "production", AcmeAccountID: "acme", DefaultDNSAccountID: "dns", ValidationMode: "auto", KeyAlgorithm: "ecdsa_p256", RenewBeforeDays: 30,
+		Domains: []string{"example.com", "*.example.com", "api.example.com", "*.api.example.com"},
+	}
+	if err := validateCertificate(input); err == nil || !strings.Contains(err.Error(), "api.example.com") {
+		t.Fatalf("expected redundant exact domain error, got %v", err)
 	}
 }
 

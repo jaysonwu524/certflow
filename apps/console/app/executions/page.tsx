@@ -1,12 +1,13 @@
 import { ExecutionList } from "@/features/automations/components/execution-list";
 import { getExecutions } from "@/lib/api";
+import { ApiUnavailableWarning } from "@/components/ui/api-unavailable-warning";
 
 export default async function ExecutionsPage() {
   const { executions, unavailable } = await getExecutions();
 
   return (
     <>
-      {unavailable ? <div className="api-warning">CertFlow API 当前不可用。</div> : null}
+      {unavailable ? <ApiUnavailableWarning /> : null}
       <ExecutionList executions={executions} />
     </>
   );

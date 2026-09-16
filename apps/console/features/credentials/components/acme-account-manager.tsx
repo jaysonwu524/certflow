@@ -23,6 +23,7 @@ import type { ACMEAccount } from "@/lib/api";
 import { formatDate, formatDateTime } from "@/lib/presentation";
 import { ResourcePagination } from "@/components/ui/resource-pagination";
 import { TableActions } from "@/components/ui/table-actions";
+import { useLocale } from "@/components/providers/locale-provider";
 
 type ACMEAccountDraft = {
   name: string;
@@ -41,6 +42,7 @@ const keyAlgorithms = [
 
 export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
   const router = useRouter();
+  const { locale, t } = useLocale();
   const [formTarget, setFormTarget] = useState<ACMEAccount | "create" | null>(null);
   const [detailsTarget, setDetailsTarget] = useState<ACMEAccount | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ACMEAccount | null>(null);
@@ -55,13 +57,7 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
     const normalized = query.trim().toLowerCase();
     if (!normalized) return accounts;
     return accounts.filter((account) =>
-      [
-        account.name,
-        account.email,
-        account.directoryUrl,
-        account.privateKeyAlgorithm,
-        account.status,
-      ]
+      [account.name, account.email, account.directoryUrl, account.privateKeyAlgorithm, account.status]
         .join(" ")
         .toLowerCase()
         .includes(normalized),
@@ -85,15 +81,15 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
   async function saveAccount(draft: ACMEAccountDraft) {
     if (!formTarget) return;
     if (!draft.name.trim()) {
-      setError("请输入 ACME 账户名称");
+      setError(t("acme.nameRequired"));
       return;
     }
     if (!draft.directoryUrl.trim()) {
-      setError("请输入 ACME Directory URL");
+      setError(t("acme.directoryRequired"));
       return;
     }
     if (!draft.email.trim()) {
-      setError("请输入联系邮箱");
+      setError(t("acme.emailRequired"));
       return;
     }
     setPending(true);
@@ -115,7 +111,7 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
       router.refresh();
     } catch (cause) {
       setPending(false);
-      setError(cause instanceof Error ? cause.message : "无法保存 ACME 账户");
+      setError(cause instanceof Error ? cause.message : t("acme.saveFailed"));
     }
   }
 
@@ -132,10 +128,10 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
       setPending(false);
       setError(
         cause instanceof ApiError && cause.status === 409
-          ? "该 ACME 账户仍被证书引用，请先解除关联后再删除。"
+          ? t("acme.deleteBlocked")
           : cause instanceof Error
             ? cause.message
-            : "无法删除 ACME 账户",
+            : t("acme.deleteFailed"),
       );
     }
   }
@@ -148,7 +144,7 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
       await apiRequest(`/api/acme-accounts/${account.id}/verify`, { method: "POST" });
       router.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "ACME 账户验证失败");
+      setError(cause instanceof Error ? cause.message : t("acme.verifyFailed"));
     } finally {
       setPending(false);
       setVerifyingId(null);
@@ -159,16 +155,29 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
     <section className="acme-account-section">
       <div className="acme-account-actions">
         <div className="resource-operation-bar">
-          <Button variant="tertiary" size="sm" onPress={() => router.refresh()}><RefreshCw size={15} />刷新</Button>
+          <Button variant="tertiary" size="sm" onPress={() => router.refresh()}>
+            <RefreshCw size={15} />
+            {t("common.refresh")}
+          </Button>
           <Button variant="primary" size="sm" onPress={openCreate}>
             <Plus size={15} />
-            新建 ACME 账户
+            {t("acme.create")}
           </Button>
         </div>
-        <div className="resource-query-bar"><div className="resource-search">
-          <Search size={15} aria-hidden="true" />
-          <Input aria-label="搜索 ACME 账户" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="搜索名称、邮箱或 Directory" />
-        </div></div>
+        <div className="resource-query-bar">
+          <div className="resource-search">
+            <Search size={15} aria-hidden="true" />
+            <Input
+              aria-label={t("common.search")}
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setPage(1);
+              }}
+              placeholder={t("acme.searchPlaceholder")}
+            />
+          </div>
+        </div>
       </div>
       {error && !formTarget && !deleteTarget ? (
         <div className="form-error" role="alert">
@@ -177,16 +186,16 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
       ) : null}
       <Table className="table-pinned-columns">
         <Table.ScrollContainer>
-          <Table.Content aria-label="ACME 账户" className="min-w-[980px]">
+          <Table.Content aria-label={t("acme.tableLabel")} className="min-w-[980px]">
             <Table.Header>
-              <Table.Column isRowHeader>名称</Table.Column>
-              <Table.Column>联系邮箱</Table.Column>
+              <Table.Column isRowHeader>{t("common.name")}</Table.Column>
+              <Table.Column>{t("acme.email")}</Table.Column>
               <Table.Column>Directory</Table.Column>
-              <Table.Column>密钥算法</Table.Column>
-              <Table.Column>状态</Table.Column>
-              <Table.Column>最近验证</Table.Column>
-              <Table.Column>创建时间</Table.Column>
-              <Table.Column>操作</Table.Column>
+              <Table.Column>{t("acme.keyAlgorithm")}</Table.Column>
+              <Table.Column>{t("common.status")}</Table.Column>
+              <Table.Column>{t("acme.lastVerified")}</Table.Column>
+              <Table.Column>{t("common.createdAt")}</Table.Column>
+              <Table.Column>{t("common.actions")}</Table.Column>
             </Table.Header>
             <Table.Body>
               {paginatedAccounts.map((account) => (
@@ -201,20 +210,46 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
                   <Table.Cell>
                     <span title={account.lastError || undefined}>
                       {account.lastError
-                        ? "失败"
+                        ? t("status.failed")
                         : account.lastVerifiedAt
-                          ? formatDateTime(account.lastVerifiedAt)
-                          : "未验证"}
+                          ? formatDateTime(account.lastVerifiedAt, locale)
+                          : t("dns.notVerified")}
                     </span>
                   </Table.Cell>
-                  <Table.Cell>{formatDate(account.createdAt)}</Table.Cell>
+                  <Table.Cell>{formatDate(account.createdAt, locale)}</Table.Cell>
                   <Table.Cell>
                     <TableActions
                       actions={[
-                        { id: "details", label: "详情", onPress: () => setDetailsTarget(account) },
-                        { id: "verify", label: "验证", pendingLabel: "验证中", onPress: () => void verifyAccount(account), isDisabled: pending, isPending: verifyingId === account.id },
-                        { id: "edit", label: "编辑", onPress: () => { setError(""); setFormTarget(account); } },
-                        { id: "delete", label: "删除", onPress: () => { setError(""); setDeleteTarget(account); }, tone: "danger" },
+                        {
+                          id: "details",
+                          label: t("common.details"),
+                          onPress: () => setDetailsTarget(account),
+                        },
+                        {
+                          id: "verify",
+                          label: t("common.verify"),
+                          pendingLabel: t("acme.verifyPending"),
+                          onPress: () => void verifyAccount(account),
+                          isDisabled: pending,
+                          isPending: verifyingId === account.id,
+                        },
+                        {
+                          id: "edit",
+                          label: t("dns.editAction"),
+                          onPress: () => {
+                            setError("");
+                            setFormTarget(account);
+                          },
+                        },
+                        {
+                          id: "delete",
+                          label: t("dns.deleteAction"),
+                          onPress: () => {
+                            setError("");
+                            setDeleteTarget(account);
+                          },
+                          tone: "danger",
+                        },
                       ]}
                     />
                   </Table.Cell>
@@ -240,17 +275,23 @@ export function ACMEAccountManager({ accounts }: { accounts: ACMEAccount[] }) {
       {accounts.length === 0 ? (
         <ResourceEmptyState
           icon={KeyRound}
-          title="尚未配置 ACME 账户"
-          description="添加账户后，即可通过 ACME 服务签发和续期证书。"
-          primaryAction={{ label: "新建 ACME 账户", icon: Plus, onPress: openCreate }}
+          title={t("acme.empty")}
+          description={t("acme.emptyDescription")}
+          primaryAction={{ label: t("acme.create"), icon: Plus, onPress: openCreate }}
         />
       ) : null}
       {accounts.length > 0 && visibleAccounts.length === 0 ? (
         <ResourceEmptyState
           icon={Search}
-          title="没有匹配的 ACME 账户"
-          description="试试调整名称、邮箱或 Directory URL 关键词。"
-          primaryAction={{ label: "清除搜索", onPress: () => { setQuery(""); setPage(1); } }}
+          title={t("acme.noResults")}
+          description={t("acme.noResultsDescription")}
+          primaryAction={{
+            label: t("cloud.clearSearch"),
+            onPress: () => {
+              setQuery("");
+              setPage(1);
+            },
+          }}
           variant="filtered"
         />
       ) : null}
@@ -294,6 +335,7 @@ function ACMEAccountFormModal({
   onClose: () => void;
   onSubmit: (draft: ACMEAccountDraft) => void;
 }) {
+  const { t } = useLocale();
   const editing = Boolean(account);
   const [algorithm, setAlgorithm] = useState(account?.privateKeyAlgorithm ?? "ecdsa_p256");
 
@@ -314,24 +356,22 @@ function ACMEAccountFormModal({
       <Modal.Backdrop>
         <Modal.Container placement="auto" scroll="inside" size="lg">
           <Modal.Dialog>
-            <Modal.CloseTrigger aria-label="关闭" />
+            <Modal.CloseTrigger aria-label={t("dns.close")} />
             <Modal.Header>
               <Modal.Icon className="bg-accent-soft text-accent-soft-foreground">
                 <KeyRound className="size-5" />
               </Modal.Icon>
-              <Modal.Heading>{editing ? "编辑 ACME 账户" : "新建 ACME 账户"}</Modal.Heading>
+              <Modal.Heading>{editing ? t("acme.edit") : t("acme.create")}</Modal.Heading>
               <p className="mt-1.5 text-sm leading-5 text-muted">
-                {editing
-                  ? "账户私钥不会回显；填写新的 PEM 可轮换账户密钥。"
-                  : "默认由 CertFlow 生成并加密保存账户私钥；如需导入已有 ACME 账户，可粘贴其 PEM。"}
+                {editing ? t("acme.formEditDescription") : t("acme.formCreateDescription")}
               </p>
             </Modal.Header>
             <Modal.Body className="p-6">
               <Surface variant="default">
                 <form id="acme-account-form" className="flex flex-col gap-4" onSubmit={submit}>
                   <TextField className="w-full" name="name" defaultValue={account?.name ?? ""} isRequired>
-                    <Label>名称</Label>
-                    <Input placeholder="例如：Let's Encrypt 生产账户" autoComplete="off" />
+                    <Label>{t("common.name")}</Label>
+                    <Input placeholder={t("acme.namePlaceholder")} autoComplete="off" />
                   </TextField>
                   <TextField
                     className="w-full"
@@ -350,16 +390,16 @@ function ACMEAccountFormModal({
                     defaultValue={account?.email ?? ""}
                     isRequired
                   >
-                    <Label>联系邮箱</Label>
-                    <Input placeholder="用于 ACME 账户通知" autoComplete="email" />
+                    <Label>{t("acme.email")}</Label>
+                    <Input placeholder={t("acme.emailPlaceholder")} autoComplete="email" />
                   </TextField>
                   <div className="cloud-provider-field">
-                    <Label>账户密钥算法</Label>
+                    <Label>{t("acme.keyAlgorithm")}</Label>
                     <Select
                       selectedKey={algorithm}
                       isRequired
                       onSelectionChange={(key) => setAlgorithm(String(key))}
-                      aria-label="账户密钥算法"
+                      aria-label={t("acme.keyAlgorithm")}
                     >
                       <Select.Trigger>
                         <Select.Value />
@@ -376,16 +416,16 @@ function ACMEAccountFormModal({
                     </Select>
                   </div>
                   <TextField className="w-full" name="privateKey" type="text">
-                    <Label>账户私钥 PEM（可选）</Label>
+                    <Label>{t("acme.privateKey")}</Label>
                     <TextArea
-                      placeholder={editing ? "留空表示保留当前账户私钥" : "留空由 CertFlow 自动生成；或粘贴已有 ACME 账户私钥 PEM"}
+                      placeholder={
+                        editing ? t("acme.privateKeyEditPlaceholder") : t("acme.privateKeyCreatePlaceholder")
+                      }
                       autoComplete="off"
                       rows={7}
                     />
                   </TextField>
-                  <p className="field-help">
-                    私钥只用于 ACME 账户认证，创建或轮换后不会回显。新建时留空会按所选算法自动生成；编辑时留空会保留现有私钥。
-                  </p>
+                  <p className="field-help">{t("acme.privateKeyHint")}</p>
                   {error ? (
                     <div className="form-error" role="alert">
                       {error}
@@ -396,10 +436,10 @@ function ACMEAccountFormModal({
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" onPress={onClose}>
-                取消
+                {t("dns.cancel")}
               </Button>
               <Button form="acme-account-form" type="submit" isDisabled={pending}>
-                {pending ? "正在保存" : "保存"}
+                {pending ? t("dns.saving") : t("dns.save")}
               </Button>
             </Modal.Footer>
           </Modal.Dialog>
@@ -422,31 +462,33 @@ function DeleteACMEAccountModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const { t } = useLocale();
   return (
     <Modal isOpen={Boolean(account)} onOpenChange={(open) => !open && onClose()}>
       <Modal.Backdrop>
         <Modal.Container placement="auto">
           <Modal.Dialog>
-            <Modal.CloseTrigger aria-label="关闭" />
+            <Modal.CloseTrigger aria-label={t("dns.close")} />
             <Modal.Header>
               <Modal.Icon className="bg-danger-soft text-danger-soft-foreground">
                 <Trash2 className="size-5" />
               </Modal.Icon>
-              <Modal.Heading>删除 ACME 账户</Modal.Heading>
+              <Modal.Heading>{t("acme.deleteTitle")}</Modal.Heading>
               <p className="mt-1.5 text-sm leading-5 text-muted">
-                将删除“{account?.name ?? ""}”。此操作无法撤销。
+                {t("acme.deleteDescription", { name: account?.name ?? "" })}
               </p>
             </Modal.Header>
             <Modal.Body className="p-6">
-              <p className="text-sm leading-5 text-muted">
-                若账户仍被证书引用，系统会阻止删除，请先解除关联。
-              </p>
+              <p className="text-sm leading-5 text-muted">{t("acme.deleteHint")}</p>
               {account && (account.certificateCount > 0 || account.automationCount > 0) ? (
                 <div className="resource-warning mt-4" role="status">
-                  当前关联 {account.certificateCount} 个证书、{account.automationCount} 个自动化任务。
+                  {t("acme.relationships", {
+                    certificates: account.certificateCount,
+                    automations: account.automationCount,
+                  })}
                 </div>
               ) : (
-                <p className="field-help mt-4">当前没有检测到证书或自动化任务关联。</p>
+                <p className="field-help mt-4">{t("acme.noRelationships")}</p>
               )}
               {error ? (
                 <div className="form-error mt-4" role="alert">
@@ -456,10 +498,10 @@ function DeleteACMEAccountModal({
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" onPress={onClose}>
-                取消
+                {t("dns.cancel")}
               </Button>
               <Button variant="danger" onPress={onConfirm} isDisabled={pending}>
-                {pending ? "正在删除" : "确认删除"}
+                {pending ? t("dns.deleting") : t("dns.confirmDelete")}
               </Button>
             </Modal.Footer>
           </Modal.Dialog>
@@ -470,37 +512,42 @@ function DeleteACMEAccountModal({
 }
 
 function ACMEAccountDetailsModal({ account, onClose }: { account: ACMEAccount | null; onClose: () => void }) {
+  const { locale, t } = useLocale();
   return (
     <Modal isOpen={Boolean(account)} onOpenChange={(open) => !open && onClose()}>
       <Modal.Backdrop>
         <Modal.Container placement="auto" scroll="inside" size="lg">
           <Modal.Dialog>
-            <Modal.CloseTrigger aria-label="关闭" />
+            <Modal.CloseTrigger aria-label={t("dns.close")} />
             <Modal.Header>
               <Modal.Icon className="bg-accent-soft text-accent-soft-foreground">
                 <KeyRound className="size-5" />
               </Modal.Icon>
-              <Modal.Heading>{account?.name ?? "ACME 账户详情"}</Modal.Heading>
-              <p className="mt-1.5 text-sm leading-5 text-muted">查看账户连接信息和当前状态。</p>
+              <Modal.Heading>{account?.name ?? t("acme.details")}</Modal.Heading>
+              <p className="mt-1.5 text-sm leading-5 text-muted">{t("acme.detailDescription")}</p>
             </Modal.Header>
             <Modal.Body className="p-6">
               {account ? (
                 <Surface variant="default">
                   <div className="flex flex-col gap-4">
                     <TextField className="w-full" value={account.name} isReadOnly>
-                      <Label>名称</Label>
+                      <Label>{t("common.name")}</Label>
                       <Input />
                     </TextField>
                     <TextField className="w-full" value={account.directoryUrl} isReadOnly>
                       <Label>ACME Directory URL</Label>
                       <Input />
                     </TextField>
-                    <TextField className="w-full" value={account.accountUrl || "未注册"} isReadOnly>
-                      <Label>ACME 账户 URL</Label>
+                    <TextField
+                      className="w-full"
+                      value={account.accountUrl || t("acme.notRegistered")}
+                      isReadOnly
+                    >
+                      <Label>{t("acme.accountUrl")}</Label>
                       <Input />
                     </TextField>
                     <TextField className="w-full" value={account.email} isReadOnly>
-                      <Label>联系邮箱</Label>
+                      <Label>{t("acme.email")}</Label>
                       <Input />
                     </TextField>
                     <TextField
@@ -508,46 +555,58 @@ function ACMEAccountDetailsModal({ account, onClose }: { account: ACMEAccount | 
                       value={algorithmLabel(account.privateKeyAlgorithm)}
                       isReadOnly
                     >
-                      <Label>账户密钥算法</Label>
+                      <Label>{t("acme.keyAlgorithm")}</Label>
                       <Input />
                     </TextField>
-                    <TextField className="w-full" value={statusLabel(account.status)} isReadOnly>
-                      <Label>状态</Label>
+                    <TextField className="w-full" value={statusLabel(account.status, t)} isReadOnly>
+                      <Label>{t("common.status")}</Label>
                       <Input />
                     </TextField>
-                    <TextField className="w-full" value={formatDate(account.createdAt)} isReadOnly>
-                      <Label>创建时间</Label>
+                    <TextField className="w-full" value={formatDate(account.createdAt, locale)} isReadOnly>
+                      <Label>{t("common.createdAt")}</Label>
                       <Input />
                     </TextField>
                     <TextField
                       className="w-full"
-                      value={account.lastVerifiedAt ? formatDateTime(account.lastVerifiedAt) : "未验证"}
+                      value={
+                        account.lastVerifiedAt
+                          ? formatDateTime(account.lastVerifiedAt, locale)
+                          : t("dns.notVerified")
+                      }
                       isReadOnly
                     >
-                      <Label>最近验证</Label>
+                      <Label>{t("acme.lastVerified")}</Label>
                       <Input />
                     </TextField>
-                    <TextField className="w-full" value={`${account.certificateCount} 个`} isReadOnly>
-                      <Label>关联证书</Label>
+                    <TextField
+                      className="w-full"
+                      value={t("common.items", { count: account.certificateCount })}
+                      isReadOnly
+                    >
+                      <Label>{t("acme.certificateCount")}</Label>
                       <Input />
                     </TextField>
-                    <TextField className="w-full" value={`${account.automationCount} 个`} isReadOnly>
-                      <Label>关联自动化任务</Label>
+                    <TextField
+                      className="w-full"
+                      value={t("common.items", { count: account.automationCount })}
+                      isReadOnly
+                    >
+                      <Label>{t("acme.automationCount")}</Label>
                       <Input />
                     </TextField>
                     {account.lastError ? (
                       <p className="form-error" role="alert">
-                        最近验证失败：{account.lastError}
+                        {t("acme.lastVerificationFailed", { error: account.lastError })}
                       </p>
                     ) : null}
-                    <p className="field-help">账户私钥已加密保存，不会在详情或 API 中回显。</p>
+                    <p className="field-help">{t("acme.privateKeyProtected")}</p>
                   </div>
                 </Surface>
               ) : null}
             </Modal.Body>
             <Modal.Footer>
               <Button variant="secondary" onPress={onClose}>
-                关闭
+                {t("dns.close")}
               </Button>
             </Modal.Footer>
           </Modal.Dialog>
@@ -557,8 +616,11 @@ function ACMEAccountDetailsModal({ account, onClose }: { account: ACMEAccount | 
   );
 }
 
-function statusLabel(status: string) {
-  return { active: "正常", disabled: "已禁用", error: "错误" }[status] ?? status;
+function statusLabel(status: string, t: ReturnType<typeof useLocale>["t"]) {
+  return (
+    { active: t("status.active"), disabled: t("status.disabled"), error: t("acme.status.error") }[status] ||
+    status
+  );
 }
 
 function algorithmLabel(algorithm: string) {

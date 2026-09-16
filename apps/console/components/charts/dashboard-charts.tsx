@@ -5,6 +5,7 @@ import * as echarts from "echarts";
 import type { EChartsOption } from "echarts";
 import { useEffect, useMemo, useRef, useSyncExternalStore, type ReactNode } from "react";
 import type { AutomationTask, Certificate, Execution } from "@/lib/api";
+import { useLocale, type TranslationKey } from "@/components/providers/locale-provider";
 
 type ChartPalette = {
   text: string;
@@ -24,11 +25,11 @@ type ChartCanvasProps = {
   isReady: boolean;
 };
 
-const expiryRanges = [
-  { label: "7 天内", days: 7 },
-  { label: "8-30 天", days: 30 },
-  { label: "31-60 天", days: 60 },
-  { label: "61-90 天", days: 90 },
+const expiryRanges: { label: TranslationKey; days: number }[] = [
+  { label: "dashboard.expiry7d", days: 7 },
+  { label: "dashboard.expiry30d", days: 30 },
+  { label: "dashboard.expiry60d", days: 60 },
+  { label: "dashboard.expiry90d", days: 90 },
 ] as const;
 
 // This palette is safe during the server render. It is replaced with the
@@ -156,6 +157,7 @@ export function DashboardCharts({
   executions: Execution[];
   automations: AutomationTask[];
 }) {
+  const { t } = useLocale();
   const { palette, isReady } = useChartPalette();
 
   const expiryCounts = useMemo(() => {
@@ -216,7 +218,7 @@ export function DashboardCharts({
       tooltip: {
         trigger: "axis",
         axisPointer: { type: "shadow" },
-        valueFormatter: (value) => `${value} 张证书`,
+        valueFormatter: (value) => t("dashboard.certificatesUnit", { count: String(value) }),
       },
       xAxis: {
         type: "value",
@@ -226,7 +228,7 @@ export function DashboardCharts({
       },
       yAxis: {
         type: "category",
-        data: expiryRanges.map((item) => item.label),
+        data: expiryRanges.map((item) => t(item.label)),
         axisTick: { show: false },
         axisLine: { show: false },
         axisLabel: { color: palette.muted, fontSize: 12 },
@@ -243,117 +245,206 @@ export function DashboardCharts({
         },
       ],
       graphic: expiryCounts.every((value) => value === 0)
-        ? { type: "text", left: "center", top: "middle", style: { text: "未来 90 天没有即将到期的已签发证书", fill: palette.muted, fontSize: 13 } }
+        ? {
+            type: "text",
+            left: "center",
+            top: "middle",
+            style: { text: t("dashboard.expiryEmpty"), fill: palette.muted, fontSize: 13 },
+          }
         : undefined,
     };
-  }, [expiryCounts, palette]);
+  }, [expiryCounts, palette, t]);
 
-  const trendOption = useMemo<EChartsOption>(() => ({
-    animation: false,
-    color: [palette.success, palette.danger, palette.warning],
-    grid: { left: 40, right: 20, top: 42, bottom: 28 },
-    legend: {
-      top: 8,
-      itemWidth: 9,
-      itemHeight: 9,
-      textStyle: { color: palette.muted, fontSize: 12 },
-      data: ["成功", "失败", "进行中"],
-    },
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
-    xAxis: {
-      type: "category",
-      data: executionTrend.labels,
-      axisTick: { show: false },
-      axisLine: { lineStyle: { color: palette.border } },
-      axisLabel: { color: palette.muted, fontSize: 11, interval: 1 },
-    },
-    yAxis: {
-      type: "value",
-      minInterval: 1,
-      axisLabel: { color: palette.muted, fontSize: 12 },
-      splitLine: { lineStyle: { color: palette.border } },
-    },
-    series: [
-      { name: "成功", type: "bar", stack: "total", data: executionTrend.succeeded, barMaxWidth: 24 },
-      { name: "失败", type: "bar", stack: "total", data: executionTrend.failed, barMaxWidth: 24 },
-      { name: "进行中", type: "bar", stack: "total", data: executionTrend.active, barMaxWidth: 24 },
-    ],
-    graphic: executionTrend.succeeded.every((value) => value === 0) && executionTrend.failed.every((value) => value === 0) && executionTrend.active.every((value) => value === 0)
-      ? { type: "text", left: "center", top: "middle", style: { text: "近 14 天暂无执行记录", fill: palette.muted, fontSize: 13 } }
-      : undefined,
-  }), [executionTrend, palette]);
+  const trendOption = useMemo<EChartsOption>(
+    () => ({
+      animation: false,
+      color: [palette.success, palette.danger, palette.warning],
+      grid: { left: 40, right: 20, top: 42, bottom: 28 },
+      legend: {
+        top: 8,
+        itemWidth: 9,
+        itemHeight: 9,
+        textStyle: { color: palette.muted, fontSize: 12 },
+        data: [t("dashboard.chart.succeeded"), t("dashboard.chart.failed"), t("dashboard.chart.running")],
+      },
+      tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+      xAxis: {
+        type: "category",
+        data: executionTrend.labels,
+        axisTick: { show: false },
+        axisLine: { lineStyle: { color: palette.border } },
+        axisLabel: { color: palette.muted, fontSize: 11, interval: 1 },
+      },
+      yAxis: {
+        type: "value",
+        minInterval: 1,
+        axisLabel: { color: palette.muted, fontSize: 12 },
+        splitLine: { lineStyle: { color: palette.border } },
+      },
+      series: [
+        {
+          name: t("dashboard.chart.succeeded"),
+          type: "bar",
+          stack: "total",
+          data: executionTrend.succeeded,
+          barMaxWidth: 24,
+        },
+        {
+          name: t("dashboard.chart.failed"),
+          type: "bar",
+          stack: "total",
+          data: executionTrend.failed,
+          barMaxWidth: 24,
+        },
+        {
+          name: t("dashboard.chart.running"),
+          type: "bar",
+          stack: "total",
+          data: executionTrend.active,
+          barMaxWidth: 24,
+        },
+      ],
+      graphic:
+        executionTrend.succeeded.every((value) => value === 0) &&
+        executionTrend.failed.every((value) => value === 0) &&
+        executionTrend.active.every((value) => value === 0)
+          ? {
+              type: "text",
+              left: "center",
+              top: "middle",
+              style: { text: t("dashboard.executionEmpty"), fill: palette.muted, fontSize: 13 },
+            }
+          : undefined,
+    }),
+    [executionTrend, palette, t],
+  );
 
-  const automationOption = useMemo<EChartsOption>(() => ({
-    animation: false,
-    color: [palette.success, palette.warning, palette.danger],
-    grid: { left: 18, right: 18, top: 54, bottom: 42 },
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, valueFormatter: (value) => `${value} 个任务` },
-    legend: {
-      top: 10,
-      icon: "roundRect",
-      itemWidth: 8,
-      itemHeight: 8,
-      textStyle: { color: palette.muted, fontSize: 12 },
-    },
-    xAxis: { type: "value", show: false, max: Math.max(automations.length, 1) },
-    yAxis: { type: "category", data: ["自动化任务"], show: false },
-    series: [
-      {
-        name: "正常",
-        type: "bar",
-        stack: "total",
-        data: [automationHealth.healthy],
-        barWidth: 32,
-        label: { show: automationHealth.healthy > 0, position: "inside", color: palette.contrastText, fontSize: 12, formatter: "{c}" },
+  const automationOption = useMemo<EChartsOption>(
+    () => ({
+      animation: false,
+      color: [palette.success, palette.warning, palette.danger],
+      grid: { left: 18, right: 18, top: 54, bottom: 42 },
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        valueFormatter: (value) => t("dashboard.tasksUnit", { count: String(value) }),
       },
-      {
-        name: "已暂停",
-        type: "bar",
-        stack: "total",
-        data: [automationHealth.paused],
-        barWidth: 32,
-        label: { show: automationHealth.paused > 0, position: "inside", color: palette.contrastText, fontSize: 12, formatter: "{c}" },
+      legend: {
+        top: 10,
+        icon: "roundRect",
+        itemWidth: 8,
+        itemHeight: 8,
+        textStyle: { color: palette.muted, fontSize: 12 },
       },
-      {
-        name: "需处理",
-        type: "bar",
-        stack: "total",
-        data: [automationHealth.attention],
-        barWidth: 32,
-        label: { show: automationHealth.attention > 0, position: "inside", color: palette.contrastText, fontSize: 12, formatter: "{c}" },
-      },
-    ],
-    graphic: automations.length === 0
-      ? { type: "text", left: "center", top: "middle", style: { text: "尚未配置自动化任务", fill: palette.muted, fontSize: 13 } }
-      : undefined,
-  }), [automationHealth, automations.length, palette]);
+      xAxis: { type: "value", show: false, max: Math.max(automations.length, 1) },
+      yAxis: { type: "category", data: [t("nav.automations")], show: false },
+      series: [
+        {
+          name: t("dashboard.chart.healthy"),
+          type: "bar",
+          stack: "total",
+          data: [automationHealth.healthy],
+          barWidth: 32,
+          label: {
+            show: automationHealth.healthy > 0,
+            position: "inside",
+            color: palette.contrastText,
+            fontSize: 12,
+            formatter: "{c}",
+          },
+        },
+        {
+          name: t("dashboard.chart.paused"),
+          type: "bar",
+          stack: "total",
+          data: [automationHealth.paused],
+          barWidth: 32,
+          label: {
+            show: automationHealth.paused > 0,
+            position: "inside",
+            color: palette.contrastText,
+            fontSize: 12,
+            formatter: "{c}",
+          },
+        },
+        {
+          name: t("dashboard.chart.attention"),
+          type: "bar",
+          stack: "total",
+          data: [automationHealth.attention],
+          barWidth: 32,
+          label: {
+            show: automationHealth.attention > 0,
+            position: "inside",
+            color: palette.contrastText,
+            fontSize: 12,
+            formatter: "{c}",
+          },
+        },
+      ],
+      graphic:
+        automations.length === 0
+          ? {
+              type: "text",
+              left: "center",
+              top: "middle",
+              style: { text: t("dashboard.automationEmpty"), fill: palette.muted, fontSize: 13 },
+            }
+          : undefined,
+    }),
+    [automationHealth, automations.length, palette, t],
+  );
 
   const expiryDescription = useMemo(
-    () => `未来 90 天内共有 ${expiryCounts.reduce((total, value) => total + value, 0)} 张证书到期。`,
-    [expiryCounts],
+    () =>
+      t("dashboard.expiryDescription", { count: expiryCounts.reduce((total, value) => total + value, 0) }),
+    [expiryCounts, t],
   );
   const automationDescription = useMemo(
-    () => `${automationHealth.attention} 个任务需要处理，${automationHealth.paused} 个任务已暂停。`,
-    [automationHealth],
+    () =>
+      t("dashboard.automationDescription", {
+        attention: automationHealth.attention,
+        paused: automationHealth.paused,
+      }),
+    [automationHealth, t],
   );
   return (
     <>
-      <section className="dashboard-chart-grid" aria-label="证书与自动化概况">
-        <ChartPanel title="证书到期分布" description={expiryDescription} link={{ href: "/certificates", label: "查看证书" }}>
-          <ChartCanvas ariaLabel="未来 90 天证书到期分布图" isReady={isReady} option={expiryOption} />
+      <section className="dashboard-chart-grid" aria-label={t("dashboard.certificatesAutomationOverview")}>
+        <ChartPanel
+          title={t("dashboard.expiryDistribution")}
+          description={expiryDescription}
+          link={{ href: "/certificates", label: t("dashboard.viewCertificates") }}
+        >
+          <ChartCanvas ariaLabel={t("dashboard.expiryChartLabel")} isReady={isReady} option={expiryOption} />
         </ChartPanel>
-        <ChartPanel title="自动化健康度" description={automationDescription} link={{ href: "/automations", label: "查看自动化" }}>
-          <ChartCanvas ariaLabel="自动化任务健康度堆叠条形图" isReady={isReady} option={automationOption} />
+        <ChartPanel
+          title={t("dashboard.automationHealth")}
+          description={automationDescription}
+          link={{ href: "/automations", label: t("dashboard.viewAutomations") }}
+        >
+          <ChartCanvas
+            ariaLabel={t("dashboard.automationChartLabel")}
+            isReady={isReady}
+            option={automationOption}
+          />
         </ChartPanel>
       </section>
-      <section className="dashboard-chart-grid dashboard-chart-grid-secondary" aria-label="执行趋势">
+      <section
+        className="dashboard-chart-grid dashboard-chart-grid-secondary"
+        aria-label={t("dashboard.executionTrend")}
+      >
         <ChartPanel
           className="dashboard-execution-chart"
-          title="近 14 天执行结果"
-          description="按执行开始日期汇总成功、失败与进行中任务。"
-          link={{ href: "/executions", label: "查看执行记录" }}
+          title={t("dashboard.executionTrend")}
+          description={t("dashboard.executionTrendDescription")}
+          link={{ href: "/executions", label: t("dashboard.executionHistory") }}
         >
-          <ChartCanvas ariaLabel="近 14 天执行结果趋势图" isReady={isReady} option={trendOption} />
+          <ChartCanvas
+            ariaLabel={t("dashboard.executionChartLabel")}
+            isReady={isReady}
+            option={trendOption}
+          />
         </ChartPanel>
       </section>
     </>

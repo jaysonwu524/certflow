@@ -32,4 +32,8 @@ func TestActorOwnershipScope(t *testing.T) {
 	if got := actorID(adminCtx); got == "" {
 		t.Fatal("admin writes must retain an owner ID")
 	}
+	personalAdminCtx := WithOwnerScope(adminCtx, "00000000-0000-0000-0000-000000000002")
+	if got := ownerID(personalAdminCtx); got != "00000000-0000-0000-0000-000000000002" {
+		t.Fatalf("scoped administrator owner ID = %q", got)
+	}
 }

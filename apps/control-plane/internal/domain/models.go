@@ -27,6 +27,82 @@ type Dashboard struct {
 	FailedExecutions   int `json:"failedExecutions"`
 }
 
+// AdminDashboard contains non-sensitive, system-wide operations data. It is
+// intentionally separate from Dashboard so a personal workspace can never
+// accidentally inherit administrator-wide aggregation semantics.
+type AdminDashboard struct {
+	Metrics            AdminDashboardMetrics     `json:"metrics"`
+	ExecutionTrend     []DashboardExecutionTrend `json:"executionTrend"`
+	ExpiryDistribution []DashboardExpiryBucket   `json:"expiryDistribution"`
+	AutomationHealth   AdminAutomationHealth     `json:"automationHealth"`
+	RiskCertificates   []AdminRiskCertificate    `json:"riskCertificates"`
+	FailedExecutions   []AdminFailedExecution    `json:"failedExecutions"`
+	ResourceOwners     []AdminResourceOwner      `json:"resourceOwners"`
+}
+
+type AdminDashboardMetrics struct {
+	ActiveUsers             int     `json:"activeUsers"`
+	NewUsers30d             int     `json:"newUsers30d"`
+	CertificatesTotal       int     `json:"certificatesTotal"`
+	CertificatesIssued      int     `json:"certificatesIssued"`
+	CertificatesExpiring7d  int     `json:"certificatesExpiring7d"`
+	CertificatesExpiring30d int     `json:"certificatesExpiring30d"`
+	JobsQueued              int     `json:"jobsQueued"`
+	JobsRunning             int     `json:"jobsRunning"`
+	FailedExecutions24h     int     `json:"failedExecutions24h"`
+	ExecutionFailureRate30d float64 `json:"executionFailureRate30d"`
+	InvalidCloudCredentials int     `json:"invalidCloudCredentials"`
+	InvalidDNSAccounts      int     `json:"invalidDNSAccounts"`
+	InvalidACMEAccounts     int     `json:"invalidACMEAccounts"`
+	SMTPConfigured          bool    `json:"smtpConfigured"`
+}
+
+type DashboardExecutionTrend struct {
+	Date      string `json:"date"`
+	Succeeded int    `json:"succeeded"`
+	Failed    int    `json:"failed"`
+	Active    int    `json:"active"`
+}
+
+type DashboardExpiryBucket struct {
+	Bucket string `json:"bucket"`
+	Count  int    `json:"count"`
+}
+
+type AdminAutomationHealth struct {
+	Healthy   int `json:"healthy"`
+	Paused    int `json:"paused"`
+	Attention int `json:"attention"`
+}
+
+type AdminRiskCertificate struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	OwnerEmail string     `json:"ownerEmail"`
+	Status     string     `json:"status"`
+	NotAfter   *time.Time `json:"notAfter"`
+	LastError  string     `json:"lastError"`
+}
+
+type AdminFailedExecution struct {
+	ID          string     `json:"id"`
+	Kind        string     `json:"kind"`
+	Certificate string     `json:"certificate"`
+	OwnerEmail  string     `json:"ownerEmail"`
+	StartedAt   *time.Time `json:"startedAt"`
+	ErrorCode   string     `json:"errorCode"`
+	Error       string     `json:"error"`
+}
+
+type AdminResourceOwner struct {
+	UserID              string     `json:"userId"`
+	Email               string     `json:"email"`
+	CertificateCount    int        `json:"certificateCount"`
+	AutomationCount     int        `json:"automationCount"`
+	FailedExecutions30d int        `json:"failedExecutions30d"`
+	LastActiveAt        *time.Time `json:"lastActiveAt"`
+}
+
 type CertificateSummary struct {
 	ID             string     `json:"id"`
 	Name           string     `json:"name"`
@@ -114,6 +190,7 @@ type ExecutionSummary struct {
 	Target      string     `json:"target"`
 	StartedAt   *time.Time `json:"startedAt"`
 	FinishedAt  *time.Time `json:"finishedAt"`
+	ErrorCode   string     `json:"errorCode"`
 	Error       string     `json:"error"`
 }
 

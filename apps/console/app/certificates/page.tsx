@@ -1,5 +1,6 @@
 import { CertificateWorkflow } from "@/features/certificates/components/certificate-workflow";
 import { CertificateList } from "@/features/certificates/components/certificate-list";
+import { ApiUnavailableWarning } from "@/components/ui/api-unavailable-warning";
 import { getACMEAccounts, getCertificates, getDNSAccounts } from "@/lib/api";
 
 export default async function CertificatesPage() {
@@ -8,7 +9,7 @@ export default async function CertificatesPage() {
 
   return (
     <>
-      {unavailable ? <div className="api-warning">CertFlow API 当前不可用。</div> : null}
+      {unavailable ? <ApiUnavailableWarning /> : null}
       <CertificateList certificates={certificates} acmeAccounts={acmeAccounts} dnsAccounts={dnsAccounts} />
       <CertificateWorkflow
         acmeAccounts={acmeAccounts.filter((account) => account.status === "active")}

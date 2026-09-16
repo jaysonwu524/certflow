@@ -2239,6 +2239,213 @@ a {
   display: grid;
   gap: 16px;
 }
+.dashboard-view-tabs {
+  display: grid;
+  gap: 16px;
+}
+.dashboard-view-tabs .tabs__list-container {
+  width: max-content;
+  max-width: 100%;
+}
+.dashboard-view-panel.tabs__panel,
+.dashboard-view-panel[data-orientation="horizontal"] {
+  padding: 0;
+}
+.dashboard-view-panel > .dashboard-layout {
+  animation: dashboard-panel-enter 180ms ease-out;
+}
+@keyframes dashboard-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.admin-dashboard-layout {
+  gap: 18px;
+}
+.admin-risk-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border));
+  border-radius: var(--radius-card);
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  font-size: 13px;
+  line-height: 1.45;
+}
+.admin-risk-banner > svg {
+  flex: 0 0 auto;
+  color: var(--warning);
+}
+.admin-risk-banner span {
+  min-width: 0;
+}
+.admin-risk-banner a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: var(--accent-strong);
+  font-weight: 650;
+  white-space: nowrap;
+}
+.admin-health-strip {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 58px;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+.admin-health-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.admin-health-heading svg {
+  color: var(--accent);
+}
+.admin-health-items {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+.admin-health-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+.admin-health-tag-healthy {
+  color: var(--accent-strong);
+}
+.admin-health-tag-attention {
+  color: var(--warning);
+}
+.admin-health-tag-danger {
+  color: var(--danger);
+}
+.admin-metric-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.metric-link {
+  display: block;
+  min-width: 0;
+}
+.metric-link .metric-card {
+  height: 100%;
+}
+.metric-link:hover .metric-card {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.admin-dashboard-chart-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.8fr) minmax(260px, 0.8fr);
+  gap: 16px;
+}
+.admin-dashboard-chart-grid .panel-header {
+  align-items: flex-start;
+  padding-top: 14px;
+  padding-bottom: 12px;
+}
+.admin-dashboard-chart-grid .dashboard-chart-canvas {
+  height: 252px;
+}
+.admin-risk-grid {
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.95fr);
+}
+.admin-panel-empty {
+  min-height: 124px;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.admin-error-text {
+  max-width: 330px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-owners-panel .panel-header-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+@media (max-width: 1280px) {
+  .admin-metric-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .admin-dashboard-chart-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 0.86fr);
+  }
+  .admin-dashboard-trend {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 900px) {
+  .admin-risk-grid {
+    grid-template-columns: 1fr;
+  }
+  .admin-health-strip {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+@media (max-width: 680px) {
+  .dashboard-view-tabs .tabs__list-container {
+    width: 100%;
+  }
+  .dashboard-view-tabs .tabs__list {
+    width: 100%;
+  }
+  .dashboard-view-tabs .tabs__tab {
+    flex: 1;
+    justify-content: center;
+  }
+  .admin-metric-grid,
+  .admin-dashboard-chart-grid {
+    grid-template-columns: 1fr;
+  }
+  .admin-dashboard-trend {
+    grid-column: auto;
+  }
+  .admin-risk-banner {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .admin-risk-banner a {
+    width: 100%;
+    margin-left: 28px;
+  }
+  .admin-health-items {
+    width: 100%;
+  }
+  .admin-dashboard-chart-grid .dashboard-chart-canvas {
+    height: 224px;
+  }
+}
 .dashboard-chart-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(300px, 0.9fr);

@@ -588,6 +588,173 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
 	return dashboard, err
 }
 
+// AdminDashboard aggregates operational state for the administrator overview.
+// Query shapes are deliberately bounded: tables are capped and trend series
+// have a fixed 30-day window so the overview cannot become an unbounded read.
+func (s *Store) AdminDashboard(ctx context.Context) (domain.AdminDashboard, error) {
+	var dashboard domain.AdminDashboard
+	err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT count(*) FROM users WHERE role = 'user' AND status = 'active' AND deleted_at IS NULL),
+			(SELECT count(*) FROM users WHERE role = 'user' AND created_at >= now() - interval '30 days' AND deleted_at IS NULL),
+			(SELECT count(*) FROM certificates WHERE deleted_at IS NULL),
+			(SELECT count(*) FROM certificates WHERE status = 'issued' AND deleted_at IS NULL),
+			(SELECT count(*) FROM certificates c JOIN certificate_versions v ON v.id = c.current_certificate_version_id WHERE c.deleted_at IS NULL AND v.not_after > now() AND v.not_after <= now() + interval '7 days'),
+			(SELECT count(*) FROM certificates c JOIN certificate_versions v ON v.id = c.current_certificate_version_id WHERE c.deleted_at IS NULL AND v.not_after > now() AND v.not_after <= now() + interval '30 days'),
+			(SELECT count(*) FROM jobs WHERE status = 'queued'),
+			(SELECT count(*) FROM jobs WHERE status = 'running'),
+			(SELECT count(*) FROM workflow_executions WHERE status = 'failed' AND created_at >= now() - interval '24 hours'),
+			COALESCE((SELECT round(100.0 * count(*) FILTER (WHERE status = 'failed') / NULLIF(count(*), 0), 1) FROM workflow_executions WHERE created_at >= now() - interval '30 days'), 0),
+			(SELECT count(*) FROM cloud_credentials WHERE status IN ('invalid', 'disabled') AND deleted_at IS NULL),
+			(SELECT count(*) FROM dns_accounts WHERE status IN ('invalid', 'disabled') AND deleted_at IS NULL),
+			(SELECT count(*) FROM acme_accounts WHERE status IN ('error', 'disabled') AND deleted_at IS NULL),
+			EXISTS(SELECT 1 FROM system_settings WHERE key = 'smtp')
+	`).Scan(
+		&dashboard.Metrics.ActiveUsers, &dashboard.Metrics.NewUsers30d,
+		&dashboard.Metrics.CertificatesTotal, &dashboard.Metrics.CertificatesIssued,
+		&dashboard.Metrics.CertificatesExpiring7d, &dashboard.Metrics.CertificatesExpiring30d,
+		&dashboard.Metrics.JobsQueued, &dashboard.Metrics.JobsRunning,
+		&dashboard.Metrics.FailedExecutions24h, &dashboard.Metrics.ExecutionFailureRate30d,
+		&dashboard.Metrics.InvalidCloudCredentials, &dashboard.Metrics.InvalidDNSAccounts,
+		&dashboard.Metrics.InvalidACMEAccounts, &dashboard.Metrics.SMTPConfigured,
+	)
+	if err != nil {
+		return domain.AdminDashboard{}, err
+	}
+
+	trendRows, err := s.pool.Query(ctx, `
+		WITH days AS (SELECT generate_series(current_date - interval '29 days', current_date, interval '1 day')::date AS day)
+		SELECT to_char(days.day, 'YYYY-MM-DD'),
+			count(e.id) FILTER (WHERE e.status = 'succeeded'),
+			count(e.id) FILTER (WHERE e.status = 'failed'),
+			count(e.id) FILTER (WHERE e.status IN ('queued', 'running'))
+		FROM days LEFT JOIN workflow_executions e ON e.created_at >= days.day AND e.created_at < days.day + interval '1 day'
+		GROUP BY days.day ORDER BY days.day
+	`)
+	if err != nil {
+		return domain.AdminDashboard{}, err
+	}
+	defer trendRows.Close()
+	for trendRows.Next() {
+		var item domain.DashboardExecutionTrend
+		if err := trendRows.Scan(&item.Date, &item.Succeeded, &item.Failed, &item.Active); err != nil {
+			return domain.AdminDashboard{}, err
+		}
+		dashboard.ExecutionTrend = append(dashboard.ExecutionTrend, item)
+	}
+	if err := trendRows.Err(); err != nil {
+		return domain.AdminDashboard{}, err
+	}
+
+	expiryRows, err := s.pool.Query(ctx, `
+		SELECT bucket, count FROM (
+			SELECT 1 AS position, 'expired'::text AS bucket, count(*)::int AS count FROM certificates c JOIN certificate_versions v ON v.id = c.current_certificate_version_id WHERE c.deleted_at IS NULL AND v.not_after <= now()
+			UNION ALL SELECT 2, 'expiring_7d', count(*)::int FROM certificates c JOIN certificate_versions v ON v.id = c.current_certificate_version_id WHERE c.deleted_at IS NULL AND v.not_after > now() AND v.not_after <= now() + interval '7 days'
+			UNION ALL SELECT 3, 'expiring_30d', count(*)::int FROM certificates c JOIN certificate_versions v ON v.id = c.current_certificate_version_id WHERE c.deleted_at IS NULL AND v.not_after > now() + interval '7 days' AND v.not_after <= now() + interval '30 days'
+			UNION ALL SELECT 4, 'healthy', count(*)::int FROM certificates c JOIN certificate_versions v ON v.id = c.current_certificate_version_id WHERE c.deleted_at IS NULL AND v.not_after > now() + interval '30 days'
+		) distribution ORDER BY position
+	`)
+	if err != nil {
+		return domain.AdminDashboard{}, err
+	}
+	defer expiryRows.Close()
+	for expiryRows.Next() {
+		var item domain.DashboardExpiryBucket
+		if err := expiryRows.Scan(&item.Bucket, &item.Count); err != nil {
+			return domain.AdminDashboard{}, err
+		}
+		dashboard.ExpiryDistribution = append(dashboard.ExpiryDistribution, item)
+	}
+	if err := expiryRows.Err(); err != nil {
+		return domain.AdminDashboard{}, err
+	}
+
+	err = s.pool.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE enabled AND COALESCE(last_status, '') <> 'failed'),
+			count(*) FILTER (WHERE NOT enabled),
+			count(*) FILTER (WHERE enabled AND last_status = 'failed')
+		FROM automation_tasks WHERE deleted_at IS NULL
+	`).Scan(&dashboard.AutomationHealth.Healthy, &dashboard.AutomationHealth.Paused, &dashboard.AutomationHealth.Attention)
+	if err != nil {
+		return domain.AdminDashboard{}, err
+	}
+
+	riskRows, err := s.pool.Query(ctx, `
+		SELECT c.id, c.name, COALESCE(u.email, ''), c.status, v.not_after, COALESCE(c.last_error, '')
+		FROM certificates c
+		LEFT JOIN certificate_versions v ON v.id = c.current_certificate_version_id
+		LEFT JOIN users u ON u.id = c.owner_user_id
+		WHERE c.deleted_at IS NULL AND (c.status IN ('failed', 'expired', 'expiring') OR (v.not_after IS NOT NULL AND v.not_after <= now() + interval '7 days'))
+		ORDER BY CASE WHEN c.status IN ('failed', 'expired') OR v.not_after <= now() THEN 0 ELSE 1 END, v.not_after NULLS LAST, c.updated_at DESC
+		LIMIT 8
+	`)
+	if err != nil {
+		return domain.AdminDashboard{}, err
+	}
+	defer riskRows.Close()
+	for riskRows.Next() {
+		var item domain.AdminRiskCertificate
+		if err := riskRows.Scan(&item.ID, &item.Name, &item.OwnerEmail, &item.Status, &item.NotAfter, &item.LastError); err != nil {
+			return domain.AdminDashboard{}, err
+		}
+		dashboard.RiskCertificates = append(dashboard.RiskCertificates, item)
+	}
+	if err := riskRows.Err(); err != nil {
+		return domain.AdminDashboard{}, err
+	}
+
+	failureRows, err := s.pool.Query(ctx, `
+		SELECT e.id, e.kind, COALESCE(c.name, ''), COALESCE(u.email, ''), e.started_at, COALESCE(e.error_code, ''), COALESCE(e.error_message, '')
+		FROM workflow_executions e
+		LEFT JOIN certificates c ON c.id = e.certificate_id
+		LEFT JOIN users u ON u.id = c.owner_user_id
+		WHERE e.status = 'failed'
+		ORDER BY e.created_at DESC LIMIT 8
+	`)
+	if err != nil {
+		return domain.AdminDashboard{}, err
+	}
+	defer failureRows.Close()
+	for failureRows.Next() {
+		var item domain.AdminFailedExecution
+		if err := failureRows.Scan(&item.ID, &item.Kind, &item.Certificate, &item.OwnerEmail, &item.StartedAt, &item.ErrorCode, &item.Error); err != nil {
+			return domain.AdminDashboard{}, err
+		}
+		dashboard.FailedExecutions = append(dashboard.FailedExecutions, item)
+	}
+	if err := failureRows.Err(); err != nil {
+		return domain.AdminDashboard{}, err
+	}
+
+	ownerRows, err := s.pool.Query(ctx, `
+		SELECT u.id, u.email,
+			count(DISTINCT c.id) FILTER (WHERE c.deleted_at IS NULL),
+			count(DISTINCT a.id) FILTER (WHERE a.deleted_at IS NULL),
+			count(DISTINCT e.id) FILTER (WHERE e.status = 'failed' AND e.created_at >= now() - interval '30 days'),
+			GREATEST(u.last_login_at, max(e.created_at))
+		FROM users u
+		LEFT JOIN certificates c ON c.owner_user_id = u.id
+		LEFT JOIN automation_tasks a ON a.owner_user_id = u.id
+		LEFT JOIN workflow_executions e ON e.certificate_id = c.id
+		WHERE u.deleted_at IS NULL
+		GROUP BY u.id, u.email, u.last_login_at
+		ORDER BY count(DISTINCT c.id) DESC, u.created_at DESC LIMIT 5
+	`)
+	if err != nil {
+		return domain.AdminDashboard{}, err
+	}
+	defer ownerRows.Close()
+	for ownerRows.Next() {
+		var item domain.AdminResourceOwner
+		if err := ownerRows.Scan(&item.UserID, &item.Email, &item.CertificateCount, &item.AutomationCount, &item.FailedExecutions30d, &item.LastActiveAt); err != nil {
+			return domain.AdminDashboard{}, err
+		}
+		dashboard.ResourceOwners = append(dashboard.ResourceOwners, item)
+	}
+	return dashboard, ownerRows.Err()
+}
+
 func (s *Store) ListCertificates(ctx context.Context) ([]domain.CertificateSummary, error) {
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
@@ -849,7 +1016,7 @@ func (s *Store) DeleteCertificate(ctx context.Context, certificateID string) err
 func (s *Store) ListExecutions(ctx context.Context) ([]domain.ExecutionSummary, error) {
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
-		SELECT e.id, e.kind, e.status, e.trigger_type, COALESCE(c.name, ''), COALESCE(t.name, ''), e.started_at, e.finished_at, COALESCE(e.error_message, '')
+		SELECT e.id, e.kind, e.status, e.trigger_type, COALESCE(c.name, ''), COALESCE(t.name, ''), e.started_at, e.finished_at, COALESCE(e.error_code, ''), COALESCE(e.error_message, '')
 		FROM workflow_executions e
 		LEFT JOIN certificates c ON c.id = e.certificate_id
 		LEFT JOIN deployment_targets t ON t.id = e.deployment_target_id
@@ -865,7 +1032,7 @@ func (s *Store) ListExecutions(ctx context.Context) ([]domain.ExecutionSummary, 
 	executions := make([]domain.ExecutionSummary, 0)
 	for rows.Next() {
 		var execution domain.ExecutionSummary
-		if err := rows.Scan(&execution.ID, &execution.Kind, &execution.Status, &execution.Trigger, &execution.Certificate, &execution.Target, &execution.StartedAt, &execution.FinishedAt, &execution.Error); err != nil {
+		if err := rows.Scan(&execution.ID, &execution.Kind, &execution.Status, &execution.Trigger, &execution.Certificate, &execution.Target, &execution.StartedAt, &execution.FinishedAt, &execution.ErrorCode, &execution.Error); err != nil {
 			return nil, err
 		}
 		executions = append(executions, execution)

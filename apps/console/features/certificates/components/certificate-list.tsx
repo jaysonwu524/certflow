@@ -3,7 +3,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Button, Input, ListBox, Select, Table, TextArea } from "@heroui/react";
-import { CheckCircle2, CircleAlert, Copy, ExternalLink, FileKey2, History, Pencil, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import {
+  CheckCircle2,
+  CircleAlert,
+  Copy,
+  ExternalLink,
+  FileKey2,
+  History,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+} from "lucide-react";
 import { ModalCancelButton, ResourceModal } from "@/components/ui/resource-modal";
 import { ResourceEmptyState } from "@/components/ui/resource-empty-state";
 import { ResourcePagination } from "@/components/ui/resource-pagination";
@@ -19,6 +31,7 @@ import type {
   DNSAccount,
 } from "@/lib/api";
 import { formatDate } from "@/lib/presentation";
+import { useLocale } from "@/components/providers/locale-provider";
 
 type CertificateDetail = Certificate & {
   acmeAccountId: string;
@@ -39,6 +52,7 @@ export function CertificateList({
   dnsAccounts: DNSAccount[];
 }) {
   const router = useRouter();
+  const { locale, t } = useLocale();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const selectedId = searchParams.get("selected");
@@ -58,7 +72,9 @@ export function CertificateList({
   const visibleCertificates = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     return certificates.filter((certificate) => {
-      const matchesQuery = !normalized || [
+      const matchesQuery =
+        !normalized ||
+        [
           certificate.name,
           ...certificate.domains,
           certificate.keyAlgorithm,
@@ -69,12 +85,19 @@ export function CertificateList({
           .join(" ")
           .toLowerCase()
           .includes(normalized);
-      return matchesQuery && (statusFilter === "all" || certificate.status === statusFilter) && matchesExpiry(certificate, expiryFilter);
+      return (
+        matchesQuery &&
+        (statusFilter === "all" || certificate.status === statusFilter) &&
+        matchesExpiry(certificate, expiryFilter)
+      );
     });
   }, [certificates, expiryFilter, query, statusFilter]);
   const pageCount = Math.max(1, Math.ceil(visibleCertificates.length / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const paginatedCertificates = visibleCertificates.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const paginatedCertificates = visibleCertificates.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize,
+  );
 
   function open(id: string) {
     const params = new URLSearchParams(searchParams.toString());
@@ -117,43 +140,73 @@ export function CertificateList({
       <section className="certificate-section">
         <div className="certificate-actions">
           <div className="resource-operation-bar">
-            <Button variant="tertiary" size="sm" onPress={() => router.refresh()}><RefreshCw size={15} />刷新</Button>
-            <Button variant="primary" size="sm" onPress={openCreate}><Plus size={15} />新建证书</Button>
+            <Button variant="tertiary" size="sm" onPress={() => router.refresh()}>
+              <RefreshCw size={15} />
+              {t("common.refresh")}
+            </Button>
+            <Button variant="primary" size="sm" onPress={openCreate}>
+              <Plus size={15} />
+              {t("certificate.create")}
+            </Button>
           </div>
           <div className="resource-query-bar certificate-query-controls">
             <div className="resource-search">
               <Search size={15} aria-hidden="true" />
               <Input
-                aria-label="搜索证书"
+                aria-label={t("common.search")}
                 value={query}
                 onChange={(event) => {
                   setQuery(event.target.value);
                   setPage(1);
                 }}
-                placeholder="搜索名称、域名或状态"
+                placeholder={t("certificate.searchPlaceholder")}
               />
             </div>
-            <div className="certificate-filter-bar" aria-label="证书筛选">
-              <Select className="certificate-filter-select" selectedKey={statusFilter} onSelectionChange={(key) => { setStatusFilter(String(key)); setPage(1); }} aria-label="按状态筛选">
-                <Select.Trigger><Select.Value /></Select.Trigger>
-                <Select.Popover><ListBox>
-                  <ListBox.Item id="all">全部状态</ListBox.Item>
-                  <ListBox.Item id="issued">已签发</ListBox.Item>
-                  <ListBox.Item id="pending">待签发</ListBox.Item>
-                  <ListBox.Item id="issuing">签发中</ListBox.Item>
-                  <ListBox.Item id="failed">失败</ListBox.Item>
-                  <ListBox.Item id="expired">已过期</ListBox.Item>
-                </ListBox></Select.Popover>
+            <div className="certificate-filter-bar" aria-label={t("certificate.filters")}>
+              <Select
+                className="certificate-filter-select"
+                selectedKey={statusFilter}
+                onSelectionChange={(key) => {
+                  setStatusFilter(String(key));
+                  setPage(1);
+                }}
+                aria-label={t("certificate.statusFilter")}
+              >
+                <Select.Trigger>
+                  <Select.Value />
+                </Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    <ListBox.Item id="all">{t("certificate.allStatuses")}</ListBox.Item>
+                    <ListBox.Item id="issued">{t("status.issued")}</ListBox.Item>
+                    <ListBox.Item id="pending">{t("status.pending")}</ListBox.Item>
+                    <ListBox.Item id="issuing">{t("status.issuing")}</ListBox.Item>
+                    <ListBox.Item id="failed">{t("status.failed")}</ListBox.Item>
+                    <ListBox.Item id="expired">{t("status.expired")}</ListBox.Item>
+                  </ListBox>
+                </Select.Popover>
               </Select>
-              <Select className="certificate-filter-select" selectedKey={expiryFilter} onSelectionChange={(key) => { setExpiryFilter(String(key)); setPage(1); }} aria-label="按有效期筛选">
-                <Select.Trigger><Select.Value /></Select.Trigger>
-                <Select.Popover><ListBox>
-                  <ListBox.Item id="all">全部有效期</ListBox.Item>
-                  <ListBox.Item id="expired">已过期</ListBox.Item>
-                  <ListBox.Item id="7">7 天内到期</ListBox.Item>
-                  <ListBox.Item id="30">30 天内到期</ListBox.Item>
-                  <ListBox.Item id="unissued">尚未签发</ListBox.Item>
-                </ListBox></Select.Popover>
+              <Select
+                className="certificate-filter-select"
+                selectedKey={expiryFilter}
+                onSelectionChange={(key) => {
+                  setExpiryFilter(String(key));
+                  setPage(1);
+                }}
+                aria-label={t("certificate.expiryFilter")}
+              >
+                <Select.Trigger>
+                  <Select.Value />
+                </Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    <ListBox.Item id="all">{t("certificate.allValidity")}</ListBox.Item>
+                    <ListBox.Item id="expired">{t("status.expired")}</ListBox.Item>
+                    <ListBox.Item id="7">{t("certificate.expiring7")}</ListBox.Item>
+                    <ListBox.Item id="30">{t("certificate.expiring30")}</ListBox.Item>
+                    <ListBox.Item id="unissued">{t("certificate.unissued")}</ListBox.Item>
+                  </ListBox>
+                </Select.Popover>
               </Select>
             </div>
           </div>
@@ -165,16 +218,16 @@ export function CertificateList({
         ) : null}
         <Table className="table-pinned-columns">
           <Table.ScrollContainer>
-            <Table.Content aria-label="证书" className="min-w-[1180px]">
+            <Table.Content aria-label={t("nav.certificates")} className="min-w-[1180px]">
               <Table.Header>
-                <Table.Column isRowHeader>名称</Table.Column>
-                <Table.Column>域名与 SAN</Table.Column>
-                <Table.Column>密钥算法</Table.Column>
-                <Table.Column>验证方式</Table.Column>
-                <Table.Column>状态</Table.Column>
-                <Table.Column>到期时间</Table.Column>
-                <Table.Column>最近签发</Table.Column>
-                <Table.Column>操作</Table.Column>
+                <Table.Column isRowHeader>{t("common.name")}</Table.Column>
+                <Table.Column>{t("certificate.domains")}</Table.Column>
+                <Table.Column>{t("certificate.keyAlgorithm")}</Table.Column>
+                <Table.Column>{t("certificate.validation")}</Table.Column>
+                <Table.Column>{t("common.status")}</Table.Column>
+                <Table.Column>{t("certificate.expiresAt")}</Table.Column>
+                <Table.Column>{t("certificate.lastIssued")}</Table.Column>
+                <Table.Column>{t("common.actions")}</Table.Column>
               </Table.Header>
               <Table.Body>
                 {paginatedCertificates.map((certificate) => (
@@ -186,28 +239,75 @@ export function CertificateList({
                       </span>
                     </Table.Cell>
                     <Table.Cell>{certificate.keyAlgorithm}</Table.Cell>
-                    <Table.Cell>{certificate.validationMode === "manual" ? "手动 TXT" : "自动 DNS"}</Table.Cell>
+                    <Table.Cell>
+                      {certificate.validationMode === "manual"
+                        ? t("certificate.validationManualShort")
+                        : t("certificate.validationAutoShort")}
+                    </Table.Cell>
                     <Table.Cell>
                       <div className="table-status-stack">
                         <StatusTag status={certificate.status} />
-                        {certificate.lastError ? <span className="table-error">{certificate.lastError}</span> : null}
+                        {certificate.lastError ? (
+                          <span className="table-error">{certificate.lastError}</span>
+                        ) : null}
                       </div>
                     </Table.Cell>
                     <Table.Cell>
                       <div className="certificate-expiry">
-                        <span>{certificate.notAfter ? formatDate(certificate.notAfter) : "待签发"}</span>
-                        {certificate.notAfter ? <small className={expiryTone(certificate.notAfter)}>{expiryLabel(certificate.notAfter)}</small> : null}
+                        <span>
+                          {certificate.notAfter
+                            ? formatDate(certificate.notAfter, locale)
+                            : t("dashboard.pendingIssuance")}
+                        </span>
+                        {certificate.notAfter ? (
+                          <small className={expiryTone(certificate.notAfter)}>
+                            {expiryLabel(certificate.notAfter, t)}
+                          </small>
+                        ) : null}
                       </div>
                     </Table.Cell>
-                    <Table.Cell>{certificate.lastIssuedAt ? formatDate(certificate.lastIssuedAt) : "暂无"}</Table.Cell>
+                    <Table.Cell>
+                      {certificate.lastIssuedAt
+                        ? formatDate(certificate.lastIssuedAt, locale)
+                        : t("certificate.noLastIssued")}
+                    </Table.Cell>
                     <Table.Cell>
                       <TableActions
                         actions={[
-                          { id: "details", label: "详情", onPress: () => open(certificate.id) },
-                          ...(certificate.validationMode === "manual" ? [{ id: "manual", label: "验证记录", onPress: () => openManual(certificate.id) }] : []),
-                          { id: "edit", label: "编辑", onPress: () => openMode(certificate.id, "edit") },
-                          { id: "issue", label: certificate.status === "failed" ? "重试" : "重新签发", onPress: () => { setError(""); setIssueTarget(certificate); }, isDisabled: isIssuanceInProgress(certificate.status) },
-                          { id: "delete", label: "删除", onPress: () => { setError(""); setDeleteTarget(certificate); }, tone: "danger" },
+                          { id: "details", label: t("common.details"), onPress: () => open(certificate.id) },
+                          ...(certificate.validationMode === "manual"
+                            ? [
+                                {
+                                  id: "manual",
+                                  label: t("certificate.manualValidation"),
+                                  onPress: () => openManual(certificate.id),
+                                },
+                              ]
+                            : []),
+                          {
+                            id: "edit",
+                            label: t("dns.editAction"),
+                            onPress: () => openMode(certificate.id, "edit"),
+                          },
+                          {
+                            id: "issue",
+                            label:
+                              certificate.status === "failed" ? t("common.retry") : t("certificate.reissue"),
+                            onPress: () => {
+                              setError("");
+                              setIssueTarget(certificate);
+                            },
+                            isDisabled: isIssuanceInProgress(certificate.status),
+                          },
+                          {
+                            id: "delete",
+                            label: t("dns.deleteAction"),
+                            onPress: () => {
+                              setError("");
+                              setDeleteTarget(certificate);
+                            },
+                            tone: "danger",
+                          },
                         ]}
                       />
                     </Table.Cell>
@@ -233,17 +333,25 @@ export function CertificateList({
         {certificates.length === 0 ? (
           <ResourceEmptyState
             icon={FileKey2}
-            title="尚未创建证书"
-            description="创建首张证书后，可在这里追踪签发、续期与部署状态。"
-            primaryAction={{ label: "新建证书", icon: Plus, onPress: openCreate }}
+            title={t("certificate.empty")}
+            description={t("certificate.emptyDescription")}
+            primaryAction={{ label: t("certificate.create"), icon: Plus, onPress: openCreate }}
           />
         ) : null}
         {certificates.length > 0 && visibleCertificates.length === 0 ? (
           <ResourceEmptyState
             icon={Search}
-            title="没有匹配的证书"
-            description="试试调整关键词、状态或有效期筛选条件。"
-            primaryAction={{ label: "清除筛选", onPress: () => { setQuery(""); setStatusFilter("all"); setExpiryFilter("all"); setPage(1); } }}
+            title={t("certificate.noResults")}
+            description={t("certificate.noResultsDescription")}
+            primaryAction={{
+              label: t("execution.clearFilters"),
+              onPress: () => {
+                setQuery("");
+                setStatusFilter("all");
+                setExpiryFilter("all");
+                setPage(1);
+              },
+            }}
             variant="filtered"
           />
         ) : null}
@@ -291,7 +399,10 @@ export function CertificateList({
           )
         ) : null}
         {selected && mode !== "manual-validation" && mode !== "edit" ? (
-          <CertificateOverview key={selected.id} certificate={detail?.id === selected.id ? detail.value : selected} />
+          <CertificateOverview
+            key={selected.id}
+            certificate={detail?.id === selected.id ? detail.value : selected}
+          />
         ) : null}
         {selected && mode !== "manual-validation" && selected.validationMode === "manual" ? (
           <div className="resource-detail-actions">
@@ -350,8 +461,14 @@ export function CertificateList({
           </>
         }
       >
-        <p className="confirm-copy">签发成功后会替换当前证书版本，并触发该证书已启用的上传 SSL 与 ALB 部署自动化。</p>
-        {error ? <div className="form-error" role="alert">{error}</div> : null}
+        <p className="confirm-copy">
+          签发成功后会替换当前证书版本，并触发该证书已启用的上传 SSL 与 ALB 部署自动化。
+        </p>
+        {error ? (
+          <div className="form-error" role="alert">
+            {error}
+          </div>
+        ) : null}
       </ResourceModal>
       <ResourceModal
         isOpen={Boolean(deleteTarget)}
@@ -437,7 +554,13 @@ export function CertificateList({
       setIssueTarget(null);
       router.refresh();
     } catch (cause) {
-      setError(cause instanceof ApiError && cause.status === 409 ? "该证书已有正在进行的签发或续期任务。" : cause instanceof Error ? cause.message : "无法发起签发任务");
+      setError(
+        cause instanceof ApiError && cause.status === 409
+          ? "该证书已有正在进行的签发或续期任务。"
+          : cause instanceof Error
+            ? cause.message
+            : "无法发起签发任务",
+      );
     } finally {
       setPending(false);
     }
@@ -665,7 +788,9 @@ function ManualValidationPanel({ certificateId }: { certificateId: string }) {
     setCheckingDNS(true);
     setError("");
     try {
-      const response = await apiRequest<{ data: ManualDNSCheck[] }>(`/api/certificates/${certificateId}/manual-challenge/check`);
+      const response = await apiRequest<{ data: ManualDNSCheck[] }>(
+        `/api/certificates/${certificateId}/manual-challenge/check`,
+      );
       setChecks(response.data);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "无法检查 DNS 解析");
@@ -706,10 +831,16 @@ function ManualValidationPanel({ certificateId }: { certificateId: string }) {
               {challenge.challenges.map((item) => (
                 <Table.Row key={`${item.fqdn}-${item.value}`}>
                   <Table.Cell>{item.domain}</Table.Cell>
-                  <Table.Cell><code className="dns-value">{item.fqdn}</code></Table.Cell>
-                  <Table.Cell><code className="dns-value">{item.value}</code></Table.Cell>
                   <Table.Cell>
-                    <TableActions actions={[{ id: "copy", label: "复制", onPress: () => copy(item.value) }]} />
+                    <code className="dns-value">{item.fqdn}</code>
+                  </Table.Cell>
+                  <Table.Cell>
+                    <code className="dns-value">{item.value}</code>
+                  </Table.Cell>
+                  <Table.Cell>
+                    <TableActions
+                      actions={[{ id: "copy", label: "复制", onPress: () => copy(item.value) }]}
+                    />
                   </Table.Cell>
                 </Table.Row>
               ))}
@@ -725,12 +856,24 @@ function ManualValidationPanel({ certificateId }: { certificateId: string }) {
         {checks ? (
           <div className="manual-dns-check-results">
             {checks.map((item) => (
-              <div className={item.matched ? "manual-dns-check-ok" : "manual-dns-check-pending"} key={`${item.fqdn}-${item.expected}`}>
+              <div
+                className={item.matched ? "manual-dns-check-ok" : "manual-dns-check-pending"}
+                key={`${item.fqdn}-${item.expected}`}
+              >
                 <strong>{item.fqdn}</strong>
-                <span>{item.matched ? "已解析到预期 TXT 值" : item.error ? "暂时无法查询到 TXT 记录" : "尚未解析到预期 TXT 值"}</span>
+                <span>
+                  {item.matched
+                    ? "已解析到预期 TXT 值"
+                    : item.error
+                      ? "暂时无法查询到 TXT 记录"
+                      : "尚未解析到预期 TXT 值"}
+                </span>
               </div>
             ))}
-            <p>该检查使用 CertFlow 所在服务器的 DNS resolver；公网递归 DNS 与 ACME 的实际验证结果可能存在传播延迟。</p>
+            <p>
+              该检查使用 CertFlow 所在服务器的 DNS resolver；公网递归 DNS 与 ACME
+              的实际验证结果可能存在传播延迟。
+            </p>
           </div>
         ) : null}
       </div>
@@ -747,6 +890,7 @@ function ManualValidationPanel({ certificateId }: { certificateId: string }) {
 }
 
 function CertificateOverview({ certificate }: { certificate: Certificate }) {
+  const { locale, t } = useLocale();
   const [versions, setVersions] = useState<CertificateVersion[] | null>(null);
   const [relations, setRelations] = useState<CertificateRelations | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -790,7 +934,16 @@ function CertificateOverview({ certificate }: { certificate: Certificate }) {
         <div>
           <dt>到期时间</dt>
           <dd>
-            {certificate.notAfter ? <><span>{formatDate(certificate.notAfter)}</span><small className={expiryTone(certificate.notAfter)}>{expiryLabel(certificate.notAfter)}</small></> : "待签发"}
+            {certificate.notAfter ? (
+              <>
+                <span>{formatDate(certificate.notAfter, locale)}</span>
+                <small className={expiryTone(certificate.notAfter)}>
+                  {expiryLabel(certificate.notAfter, t)}
+                </small>
+              </>
+            ) : (
+              "待签发"
+            )}
           </dd>
         </div>
         <div className="certificate-detail-wide">
@@ -824,7 +977,11 @@ function CertificateOverview({ certificate }: { certificate: Certificate }) {
           {certificate.lastError}
         </div>
       ) : null}
-      {loadError ? <div className="form-error" role="alert">无法加载版本与关联资源：{loadError}</div> : null}
+      {loadError ? (
+        <div className="form-error" role="alert">
+          无法加载版本与关联资源：{loadError}
+        </div>
+      ) : null}
       <CertificateVersionHistory versions={versions} />
       <CertificateRelationSummary relations={relations} />
     </div>
@@ -836,22 +993,47 @@ function CertificateVersionHistory({ versions }: { versions: CertificateVersion[
     <section className="certificate-subsection" aria-labelledby="certificate-version-heading">
       <div className="certificate-subsection-heading">
         <History size={17} aria-hidden="true" />
-        <div><h2 id="certificate-version-heading">版本历史</h2><p>仅展示版本元数据，私钥与证书内容不会在页面回显。</p></div>
+        <div>
+          <h2 id="certificate-version-heading">版本历史</h2>
+          <p>仅展示版本元数据，私钥与证书内容不会在页面回显。</p>
+        </div>
       </div>
-      {versions === null ? <div className="certificate-inline-loading">正在加载版本历史。</div> : versions.length === 0 ? <div className="certificate-inline-empty">尚无已签发版本。</div> : (
+      {versions === null ? (
+        <div className="certificate-inline-loading">正在加载版本历史。</div>
+      ) : versions.length === 0 ? (
+        <div className="certificate-inline-empty">尚无已签发版本。</div>
+      ) : (
         <Table>
           <Table.ScrollContainer>
             <Table.Content aria-label="证书版本历史" className="min-w-[680px]">
               <Table.Header>
-                <Table.Column isRowHeader>版本</Table.Column><Table.Column>有效期</Table.Column><Table.Column>签发时间</Table.Column><Table.Column>状态</Table.Column>
+                <Table.Column isRowHeader>版本</Table.Column>
+                <Table.Column>有效期</Table.Column>
+                <Table.Column>签发时间</Table.Column>
+                <Table.Column>状态</Table.Column>
               </Table.Header>
               <Table.Body>
                 {versions.map((version) => (
                   <Table.Row key={version.id}>
-                    <Table.Cell><div className="version-cell"><strong>{version.isCurrent ? "当前版本" : "历史版本"}</strong><code>{version.serialNumber || version.fingerprint || version.id}</code></div></Table.Cell>
-                    <Table.Cell>{formatDate(version.notBefore)} 至 {formatDate(version.notAfter)}</Table.Cell>
+                    <Table.Cell>
+                      <div className="version-cell">
+                        <strong>{version.isCurrent ? "当前版本" : "历史版本"}</strong>
+                        <code>{version.serialNumber || version.fingerprint || version.id}</code>
+                      </div>
+                    </Table.Cell>
+                    <Table.Cell>
+                      {formatDate(version.notBefore)} 至 {formatDate(version.notAfter)}
+                    </Table.Cell>
                     <Table.Cell>{formatDate(version.issuedAt)}</Table.Cell>
-                    <Table.Cell>{version.revokedAt ? <StatusTag status="revoked" /> : version.isCurrent ? <StatusTag status="issued" /> : <span className="muted">已归档</span>}</Table.Cell>
+                    <Table.Cell>
+                      {version.revokedAt ? (
+                        <StatusTag status="revoked" />
+                      ) : version.isCurrent ? (
+                        <StatusTag status="issued" />
+                      ) : (
+                        <span className="muted">已归档</span>
+                      )}
+                    </Table.Cell>
                   </Table.Row>
                 ))}
               </Table.Body>
@@ -867,22 +1049,63 @@ function CertificateRelationSummary({ relations }: { relations: CertificateRelat
   return (
     <section className="certificate-subsection" aria-labelledby="certificate-relations-heading">
       <div className="certificate-subsection-heading">
-        <div><h2 id="certificate-relations-heading">关联资源</h2><p>证书重新签发成功后，已启用的自动化会按其配置继续执行。</p></div>
+        <div>
+          <h2 id="certificate-relations-heading">关联资源</h2>
+          <p>证书重新签发成功后，已启用的自动化会按其配置继续执行。</p>
+        </div>
       </div>
-      {relations === null ? <div className="certificate-inline-loading">正在加载关联资源。</div> : (
+      {relations === null ? (
+        <div className="certificate-inline-loading">正在加载关联资源。</div>
+      ) : (
         <div className="certificate-relations-grid">
           <RelationCard title="ACME 账户" resource={relations.acmeAccount} empty="未找到关联账户" />
           <RelationCard title="DNS 账户" resource={relations.dnsAccount} empty="手动验证或未配置 DNS 账户" />
-          <RelationCard title="自动化任务" count={relations.automations.length} detail={relations.automations.length ? relations.automations.map((item) => `${item.name}（${automationActionLabel(item.actionType)}）`).join("、") : "尚未配置"} />
-          <RelationCard title="部署目标" count={relations.deployments.length} detail={relations.deployments.length ? relations.deployments.map((item) => item.targetName).join("、") : "尚未配置"} />
+          <RelationCard
+            title="自动化任务"
+            count={relations.automations.length}
+            detail={
+              relations.automations.length
+                ? relations.automations
+                    .map((item) => `${item.name}（${automationActionLabel(item.actionType)}）`)
+                    .join("、")
+                : "尚未配置"
+            }
+          />
+          <RelationCard
+            title="部署目标"
+            count={relations.deployments.length}
+            detail={
+              relations.deployments.length
+                ? relations.deployments.map((item) => item.targetName).join("、")
+                : "尚未配置"
+            }
+          />
         </div>
       )}
     </section>
   );
 }
 
-function RelationCard({ title, resource, empty, count, detail }: { title: string; resource?: { name: string; status: string } | null; empty?: string; count?: number; detail?: string }) {
-  return <div className="certificate-relation-card"><span>{title}</span><strong>{resource ? resource.name : count === undefined ? empty : `${count} 个`}</strong><small>{resource ? resource.status : detail}</small></div>;
+function RelationCard({
+  title,
+  resource,
+  empty,
+  count,
+  detail,
+}: {
+  title: string;
+  resource?: { name: string; status: string } | null;
+  empty?: string;
+  count?: number;
+  detail?: string;
+}) {
+  return (
+    <div className="certificate-relation-card">
+      <span>{title}</span>
+      <strong>{resource ? resource.name : count === undefined ? empty : `${count} 个`}</strong>
+      <small>{resource ? resource.status : detail}</small>
+    </div>
+  );
 }
 
 function automationActionLabel(action: CertificateRelations["automations"][number]["actionType"]) {
@@ -903,11 +1126,11 @@ function matchesExpiry(certificate: Certificate, filter: string) {
   return false;
 }
 
-function expiryLabel(value: string) {
+function expiryLabel(value: string, t: ReturnType<typeof useLocale>["t"]) {
   const remaining = Math.ceil((new Date(value).getTime() - Date.now()) / 86_400_000);
-  if (remaining < 0) return `已过期 ${Math.abs(remaining)} 天`;
-  if (remaining === 0) return "今天到期";
-  return `剩余 ${remaining} 天`;
+  if (remaining < 0) return t("certificate.expiredDays", { days: Math.abs(remaining) });
+  if (remaining === 0) return t("certificate.expiresToday");
+  return t("certificate.daysRemaining", { days: remaining });
 }
 
 function expiryTone(value: string) {
@@ -919,6 +1142,7 @@ function expiryTone(value: string) {
 
 function validateDomains(domains: string[]) {
   const unique = new Set<string>();
+  const wildcards = new Map<string, string>();
   for (const domain of domains) {
     if (unique.has(domain)) return `域名重复：${domain}`;
     unique.add(domain);
@@ -928,6 +1152,13 @@ function validateDomains(domains: string[]) {
     ) {
       return `域名格式无效：${domain}`;
     }
+    if (domain.startsWith("*.")) wildcards.set(domain.slice(2), domain);
+  }
+  for (const domain of domains) {
+    if (domain.startsWith("*.")) continue;
+    const [, ...parentLabels] = domain.split(".");
+    const wildcard = wildcards.get(parentLabels.join("."));
+    if (wildcard) return `域名 ${domain} 已被 ${wildcard} 覆盖，请移除精确域名`;
   }
   return "";
 }

@@ -3,6 +3,7 @@
 import type { ReactNode } from "react";
 import { Button, Modal } from "@heroui/react";
 import { X } from "lucide-react";
+import { useLocale } from "@/components/providers/locale-provider";
 
 type ResourceModalSize = "compact" | "standard" | "wide" | "workflow";
 
@@ -27,18 +28,21 @@ export function ResourceModal({
   size = "standard",
   onOpenChange,
 }: ResourceModalProps) {
+  const { t } = useLocale();
   return (
     <Modal isOpen={isOpen} onOpenChange={onOpenChange}>
       <Modal.Backdrop variant="opaque" className="resource-modal-backdrop">
         <Modal.Container scroll="inside">
           <Modal.Dialog className={`resource-modal-dialog resource-modal-dialog-${size}`}>
-            <Modal.Header className={`resource-modal-header ${headerIcon ? "resource-modal-header-with-icon" : ""}`}>
+            <Modal.Header
+              className={`resource-modal-header ${headerIcon ? "resource-modal-header-with-icon" : ""}`}
+            >
               {headerIcon ? <Modal.Icon className="resource-modal-icon">{headerIcon}</Modal.Icon> : null}
               <div>
                 <Modal.Heading>{title}</Modal.Heading>
                 {description ? <p>{description}</p> : null}
               </div>
-              <Modal.CloseTrigger aria-label="关闭">
+              <Modal.CloseTrigger aria-label={t("common.close")}>
                 <X size={18} />
               </Modal.CloseTrigger>
             </Modal.Header>
@@ -52,9 +56,10 @@ export function ResourceModal({
 }
 
 export function ModalCancelButton({ onPress }: { onPress: () => void }) {
+  const { t } = useLocale();
   return (
     <Button type="button" variant="secondary" onPress={onPress}>
-      取消
+      {t("common.cancel")}
     </Button>
   );
 }

@@ -7,14 +7,20 @@ import { ArrowLeft, ArrowRight, Check, ShieldCheck } from "lucide-react";
 import { ResourceModal, ModalCancelButton } from "@/components/ui/resource-modal";
 import { apiRequest } from "@/lib/api-client";
 import type { ACMEAccount, DNSAccount } from "@/lib/api";
+import { useLocale, type TranslationKey } from "@/components/providers/locale-provider";
 
 type ValidationMode = "auto" | "manual";
 type CertificateWorkflowProps = { acmeAccounts: ACMEAccount[]; dnsAccounts: DNSAccount[] };
 
-const steps = ["证书身份", "签发验证", "续期策略"] as const;
+const stepKeys: TranslationKey[] = [
+  "certificate.stepIdentity",
+  "certificate.stepValidation",
+  "certificate.stepRenewal",
+];
 
 export function CertificateWorkflow({ acmeAccounts, dnsAccounts }: CertificateWorkflowProps) {
   const router = useRouter();
+  const { t } = useLocale();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const open = searchParams.get("modal") === "create";
@@ -37,7 +43,7 @@ export function CertificateWorkflow({ acmeAccounts, dnsAccounts }: CertificateWo
         .filter(Boolean),
     [domainsText],
   );
-  const domainError = useMemo(() => validateDomains(domains), [domains]);
+  const domainError = useMemo(() => validateDomains(domains, t), [domains, t]);
   const canSubmit = acmeAccounts.length > 0 && (validationMode === "manual" || dnsAccounts.length > 0);
 
   function close() {
@@ -55,21 +61,21 @@ export function CertificateWorkflow({ acmeAccounts, dnsAccounts }: CertificateWo
   function nextStep() {
     setError("");
     if (step === 0) {
-      if (!name.trim()) return setError("请输入证书名称");
-      if (domains.length === 0) return setError("至少填写一个域名");
+      if (!name.trim()) return setError(t("certificate.nameRequired"));
+      if (domains.length === 0) return setError(t("certificate.domainRequired"));
       if (domainError) return setError(domainError);
     }
     if (step === 1) {
-      if (!acmeAccountId) return setError("请选择 ACME 账户");
-      if (validationMode === "auto" && !dnsAccountId) return setError("自动 DNS 模式需要选择 DNS 账户");
+      if (!acmeAccountId) return setError(t("certificate.acmeRequired"));
+      if (validationMode === "auto" && !dnsAccountId) return setError(t("certificate.dnsRequired"));
     }
-    setStep((current) => Math.min(current + 1, steps.length - 1));
+    setStep((current) => Math.min(current + 1, stepKeys.length - 1));
   }
 
   async function submit() {
     setError("");
     if (!canSubmit) {
-      setError("创建证书前，需要 ACME 账户；自动模式还需要 DNS 账户。");
+      setError(t("certificate.requirementsMissing"));
       return;
     }
     setPending(true);
@@ -89,7 +95,7 @@ export function CertificateWorkflow({ acmeAccounts, dnsAccounts }: CertificateWo
       close();
       router.refresh();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "无法创建证书配置");
+      setError(requestError instanceof Error ? requestError.message : t("certificate.createFailed"));
     } finally {
       setPending(false);
     }
@@ -100,8 +106,8 @@ export function CertificateWorkflow({ acmeAccounts, dnsAccounts }: CertificateWo
       isOpen={open}
       onOpenChange={(isOpen) => !isOpen && close()}
       size="wide"
-      title="新建证书"
-      description="创建后会自动排队签发；自动续期、SSL 上传和 ALB 更新在自动化中配置。"
+      title={t("certificate.create")}
+      description={t("certificate.createDescription")}
       footer={
         <div className="certificate-workflow-footer">
           {step > 0 ? (
@@ -113,33 +119,33 @@ export function CertificateWorkflow({ acmeAccounts, dnsAccounts }: CertificateWo
               }}
             >
               <ArrowLeft size={16} />
-              上一步
+              {t("certificate.previous")}
             </Button>
           ) : (
             <ModalCancelButton onPress={close} />
           )}
-          {step < steps.length - 1 ? (
+          {step < stepKeys.length - 1 ? (
             <Button variant="primary" onPress={nextStep}>
-              下一步
+              {t("certificate.next")}
               <ArrowRight size={16} />
             </Button>
           ) : (
             <Button variant="primary" onPress={submit} isDisabled={pending}>
               <ShieldCheck size={16} />
-              {pending ? "正在创建" : "创建并排队签发"}
+              {pending ? t("certificate.creating") : t("certificate.createAndQueue")}
             </Button>
           )}
         </div>
       }
     >
-      <div className="workflow-steps" aria-label="证书创建步骤">
-        {steps.map((label, index) => (
+      <div className="workflow-steps" aria-label={t("certificate.creationSteps")}>
+        {stepKeys.map((key, index) => (
           <div
             className={`workflow-step ${index === step ? "workflow-step-active" : ""} ${index < step ? "workflow-step-complete" : ""}`}
-            key={label}
+            key={key}
           >
             <span>{index < step ? <Check size={14} /> : index + 1}</span>
-            {label}
+            {t(key)}
           </div>
         ))}
       </div>
@@ -195,11 +201,12 @@ function IdentityStep({
   setKeyAlgorithm: (value: string) => void;
   domainError: string;
 }) {
+  const { t } = useLocale();
   return (
     <div className="workflow-panel">
       <div className="field-grid">
         <div className="field field-wide">
-          <label htmlFor="certificate-name">名称</label>
+          <label htmlFor="certificate-name">{t("common.name")}</label>
           <Input
             id="certificate-name"
             value={name}
@@ -208,11 +215,11 @@ function IdentityStep({
           />
         </div>
         <div className="field">
-          <label htmlFor="certificate-key-algorithm">密钥算法</label>
+          <label htmlFor="certificate-key-algorithm">{t("certificate.keyAlgorithm")}</label>
           <Select
             selectedKey={keyAlgorithm}
             onSelectionChange={(key) => setKeyAlgorithm(String(key))}
-            aria-label="密钥算法"
+            aria-label={t("certificate.keyAlgorithm")}
           >
             <Select.Trigger>
               <Select.Value />
@@ -228,16 +235,14 @@ function IdentityStep({
           </Select>
         </div>
         <div className="field field-wide">
-          <label htmlFor="certificate-domains">域名与 SAN</label>
+          <label htmlFor="certificate-domains">{t("certificate.domains")}</label>
           <TextArea
             id="certificate-domains"
             value={domainsText}
             onChange={(event) => setDomainsText(event.target.value)}
             placeholder={"example.com\n*.example.com\n*.api.example.com"}
           />
-          <span className="field-help">
-            每行一个域名。通配符只覆盖一层子域；三级域名请明确添加对应的 `*.api.example.com`。
-          </span>
+          <span className="field-help">{t("certificate.domainHint")}</span>
           {domainError ? (
             <span className="field-help zone-error" role="alert">
               {domainError}
@@ -268,15 +273,16 @@ function ValidationStep({
   validationMode: ValidationMode;
   setValidationMode: (value: ValidationMode) => void;
 }) {
+  const { t } = useLocale();
   return (
     <div className="workflow-panel">
       <div className="field-grid">
         <div className="field">
-          <label htmlFor="certificate-acme">ACME 账户</label>
+          <label htmlFor="certificate-acme">{t("acme.tableLabel")}</label>
           <Select
             selectedKey={acmeAccountId}
             onSelectionChange={(key) => setAcmeAccountId(String(key))}
-            aria-label="ACME 账户"
+            aria-label={t("acme.tableLabel")}
           >
             <Select.Trigger>
               <Select.Value />
@@ -292,16 +298,16 @@ function ValidationStep({
             </Select.Popover>
           </Select>
           {acmeAccounts.length === 0 ? (
-            <span className="field-help zone-error">请先配置 ACME 账户</span>
+            <span className="field-help zone-error">{t("certificate.noAcme")}</span>
           ) : null}
         </div>
         <div className="field">
-          <label htmlFor="certificate-dns">DNS 账户</label>
+          <label htmlFor="certificate-dns">{t("dns.tableLabel")}</label>
           <Select
             selectedKey={dnsAccountId}
             onSelectionChange={(key) => setDnsAccountId(String(key))}
             isDisabled={validationMode === "manual"}
-            aria-label="DNS 账户"
+            aria-label={t("dns.tableLabel")}
           >
             <Select.Trigger>
               <Select.Value />
@@ -317,29 +323,29 @@ function ValidationStep({
             </Select.Popover>
           </Select>
           {validationMode === "manual" ? (
-            <span className="field-help">手动 TXT 模式无需 DNS 账户</span>
+            <span className="field-help">{t("certificate.manualNoDns")}</span>
           ) : dnsAccounts.length === 0 ? (
-            <span className="field-help zone-error">请先配置 DNS 账户</span>
+            <span className="field-help zone-error">{t("certificate.noDns")}</span>
           ) : null}
         </div>
         <div className="field field-wide">
-          <label htmlFor="certificate-validation-mode">DNS-01 验证方式</label>
+          <label htmlFor="certificate-validation-mode">{t("certificate.validationMode")}</label>
           <Select
             selectedKey={validationMode}
             onSelectionChange={(key) => setValidationMode(String(key) as ValidationMode)}
-            aria-label="DNS-01 验证方式"
+            aria-label={t("certificate.validationMode")}
           >
             <Select.Trigger>
               <Select.Value />
             </Select.Trigger>
             <Select.Popover>
               <ListBox>
-                <ListBox.Item id="auto">自动更新 DNS TXT</ListBox.Item>
-                <ListBox.Item id="manual">手动添加 DNS TXT</ListBox.Item>
+                <ListBox.Item id="auto">{t("certificate.validationAuto")}</ListBox.Item>
+                <ListBox.Item id="manual">{t("certificate.validationManual")}</ListBox.Item>
               </ListBox>
             </Select.Popover>
           </Select>
-          <span className="field-help">手动模式会暂停签发并显示 TXT 记录，确认后继续校验。</span>
+          <span className="field-help">{t("certificate.validationHint")}</span>
         </div>
       </div>
     </div>
@@ -353,11 +359,12 @@ function RenewalStep({
   renewBeforeDays: string;
   setRenewBeforeDays: (value: string) => void;
 }) {
+  const { t } = useLocale();
   return (
     <div className="workflow-panel">
       <div className="field-grid">
         <div className="field">
-          <label htmlFor="certificate-renew-before">提前续期天数</label>
+          <label htmlFor="certificate-renew-before">{t("certificate.renewBeforeDays")}</label>
           <Input
             id="certificate-renew-before"
             type="number"
@@ -368,20 +375,26 @@ function RenewalStep({
           />
         </div>
       </div>
-      <div className="workflow-note">
-        证书本身不再单独配置自动续期。请在“自动化”中创建定期续期、SSL 上传或 ALB 更新任务。
-      </div>
+      <div className="workflow-note">{t("certificate.renewalHint")}</div>
     </div>
   );
 }
 
-function validateDomains(domains: string[]) {
+function validateDomains(domains: string[], t: ReturnType<typeof useLocale>["t"]) {
   const unique = new Set<string>();
+  const wildcards = new Map<string, string>();
   for (const domain of domains) {
-    if (unique.has(domain)) return `域名重复：${domain}`;
+    if (unique.has(domain)) return t("certificate.domainDuplicate", { domain });
     unique.add(domain);
     if (domain.length > 253 || !/^(\*\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(domain))
-      return `域名格式无效：${domain}`;
+      return t("certificate.domainInvalid", { domain });
+    if (domain.startsWith("*.")) wildcards.set(domain.slice(2), domain);
+  }
+  for (const domain of domains) {
+    if (domain.startsWith("*.")) continue;
+    const [, ...parentLabels] = domain.split(".");
+    const wildcard = wildcards.get(parentLabels.join("."));
+    if (wildcard) return t("certificate.domainCovered", { domain, wildcard });
   }
   return "";
 }

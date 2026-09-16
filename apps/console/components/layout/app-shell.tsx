@@ -205,7 +205,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div className={`app-frame ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className={`sidebar ${navOpen ? "mobile-nav-open" : ""}`}>
         <div className="sidebar-brand-row">
-          <Link href="/dashboard" className="brand" aria-label="CertFlow 首页">
+          <Link href="/dashboard" className="brand" aria-label={t("navigation.home")}>
             <BrandLogo priority />
           </Link>
           {!sidebarCollapsed ? (
@@ -213,7 +213,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               className="sidebar-toggle"
               variant="ghost"
               isIconOnly
-              aria-label="收起侧栏"
+              aria-label={t("navigation.collapseSidebar")}
               onPress={() => setSidebarCollapsed(true)}
             >
               <PanelLeftClose size={18} />
@@ -224,13 +224,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           className="mobile-menu-button"
           variant="ghost"
           isIconOnly
-          aria-label={navOpen ? "收起导航" : "展开导航"}
+          aria-label={navOpen ? t("navigation.collapse") : t("navigation.expand")}
           onPress={() => setNavOpen((open) => !open)}
         >
           <Menu size={19} />
         </Button>
 
-        <nav className="sidebar-nav" aria-label="主导航">
+        <nav className="sidebar-nav" aria-label={t("navigation.main")}>
           <div className="nav-group nav-group-primary">
             <NavigationLink item={dashboardItem} onNavigate={() => setNavOpen(false)} />
           </div>
@@ -299,7 +299,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               className="nav-link sidebar-expand-control"
               variant="ghost"
               isIconOnly
-              aria-label="展开侧栏"
+              aria-label={t("navigation.expandSidebar")}
               onPress={() => setSidebarCollapsed(false)}
             >
               <PanelLeftOpen size={18} strokeWidth={1.8} />
@@ -321,51 +321,51 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="header-preference-actions">
               {currentUser ? <NotificationCenter /> : null}
               <Dropdown>
-              <Dropdown.Trigger className="theme-trigger" aria-label={t("theme.change")}>
-                {selectedTheme === "dark" ? (
-                  <Moon size={16} aria-hidden="true" />
-                ) : selectedTheme === "light" ? (
-                  <Sun size={16} aria-hidden="true" />
-                ) : (
-                  <Monitor size={16} aria-hidden="true" />
-                )}
-              </Dropdown.Trigger>
-              <Dropdown.Popover placement="bottom end">
-                <Dropdown.Menu
-                  selectedKeys={[selectedTheme]}
-                  selectionMode="single"
-                  onAction={(key) => setTheme(String(key))}
-                >
-                  <Dropdown.Item id="system">
-                    <Monitor size={16} />
-                    {t("theme.system")}
-                  </Dropdown.Item>
-                  <Dropdown.Item id="light">
-                    <Sun size={16} />
-                    {t("theme.light")}
-                  </Dropdown.Item>
-                  <Dropdown.Item id="dark">
-                    <Moon size={16} />
-                    {t("theme.dark")}
-                  </Dropdown.Item>
-                </Dropdown.Menu>
-              </Dropdown.Popover>
+                <Dropdown.Trigger className="theme-trigger" aria-label={t("theme.change")}>
+                  {selectedTheme === "dark" ? (
+                    <Moon size={16} aria-hidden="true" />
+                  ) : selectedTheme === "light" ? (
+                    <Sun size={16} aria-hidden="true" />
+                  ) : (
+                    <Monitor size={16} aria-hidden="true" />
+                  )}
+                </Dropdown.Trigger>
+                <Dropdown.Popover placement="bottom end">
+                  <Dropdown.Menu
+                    selectedKeys={[selectedTheme]}
+                    selectionMode="single"
+                    onAction={(key) => setTheme(String(key))}
+                  >
+                    <Dropdown.Item id="system">
+                      <Monitor size={16} />
+                      {t("theme.system")}
+                    </Dropdown.Item>
+                    <Dropdown.Item id="light">
+                      <Sun size={16} />
+                      {t("theme.light")}
+                    </Dropdown.Item>
+                    <Dropdown.Item id="dark">
+                      <Moon size={16} />
+                      {t("theme.dark")}
+                    </Dropdown.Item>
+                  </Dropdown.Menu>
+                </Dropdown.Popover>
               </Dropdown>
               <Dropdown>
-              <Dropdown.Trigger className="locale-trigger" aria-label={t("language.change")}>
-                <Languages size={16} aria-hidden="true" />
-                <span>{locale === "zh-CN" ? "中" : "EN"}</span>
-              </Dropdown.Trigger>
-              <Dropdown.Popover placement="bottom end">
-                <Dropdown.Menu
-                  selectedKeys={[locale]}
-                  selectionMode="single"
-                  onAction={(key) => setLocale(key as "zh-CN" | "en")}
-                >
-                  <Dropdown.Item id="zh-CN">{t("language.zh-CN")}</Dropdown.Item>
-                  <Dropdown.Item id="en">{t("language.en")}</Dropdown.Item>
-                </Dropdown.Menu>
-              </Dropdown.Popover>
+                <Dropdown.Trigger className="locale-trigger" aria-label={t("language.change")}>
+                  <Languages size={16} aria-hidden="true" />
+                  <span>{locale === "zh-CN" ? "中" : "EN"}</span>
+                </Dropdown.Trigger>
+                <Dropdown.Popover placement="bottom end">
+                  <Dropdown.Menu
+                    selectedKeys={[locale]}
+                    selectionMode="single"
+                    onAction={(key) => setLocale(key as "zh-CN" | "en")}
+                  >
+                    <Dropdown.Item id="zh-CN">{t("language.zh-CN")}</Dropdown.Item>
+                    <Dropdown.Item id="en">{t("language.en")}</Dropdown.Item>
+                  </Dropdown.Menu>
+                </Dropdown.Popover>
               </Dropdown>
             </div>
             {currentUser ? (
