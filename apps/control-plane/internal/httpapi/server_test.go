@@ -5,12 +5,103 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/regenbio/certflow/apps/control-plane/internal/cloudprovider"
 	"github.com/regenbio/certflow/apps/control-plane/internal/domain"
 )
+
+func TestMetricsEndpointRecordsRouteWithoutRecordingScrapes(t *testing.T) {
+	server := New(nil, nil)
+	router := server.Router()
+
+	health := httptest.NewRecorder()
+	router.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", health.Code, http.StatusOK)
+	}
+
+	metrics := httptest.NewRecorder()
+	router.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, want %d", metrics.Code, http.StatusOK)
+	}
+	body := metrics.Body.String()
+	if !strings.Contains(body, `certflow_http_requests_total{method="GET",route="/healthz",status="200"} 1`) {
+		t.Fatalf("metrics response did not include the health route counter: %s", body)
+	}
+	if strings.Contains(body, `route="/metrics"`) {
+		t.Fatalf("metrics scrape must not create a /metrics request series: %s", body)
+	}
+}
+
+func TestMetricsResponseWriterSupportsStreamingFlush(t *testing.T) {
+	var _ http.Flusher = (*metricsResponseWriter)(nil)
+	recorder := httptest.NewRecorder()
+	writer := &metricsResponseWriter{ResponseWriter: recorder, status: http.StatusOK}
+	writer.Flush()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("flush status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+}
+
+func TestAuditResourceOnlyUsesCanonicalUUIDPathParameters(t *testing.T) {
+	tests := []struct {
+		path         string
+		resourceType string
+		resourceID   string
+	}{
+		{"/api/v1/cloud-credentials/11111111-1111-1111-1111-111111111111/verify", "cloud-credential", "11111111-1111-1111-1111-111111111111"},
+		{"/api/v1/certificates/not-a-uuid/issue", "certificate", ""},
+		{"/api/v1/profile/webhook", "profile", ""},
+		{"/healthz", "api", ""},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			resourceType, resourceID := auditResource(httptest.NewRequest("POST", test.path, nil))
+			if resourceType != test.resourceType || resourceID != test.resourceID {
+				t.Fatalf("auditResource() = (%q, %q), want (%q, %q)", resourceType, resourceID, test.resourceType, test.resourceID)
+			}
+		})
+	}
+}
+
+func TestRequestSourceIPUsesRemoteAddressWithoutForwardedTrust(t *testing.T) {
+	request := httptest.NewRequest("POST", "/api/v1/certificates", nil)
+	request.RemoteAddr = "203.0.113.12:443"
+	request.Header.Set("X-Forwarded-For", "198.51.100.1")
+	if got, want := requestSourceIP(request), "203.0.113.12"; got != want {
+		t.Fatalf("requestSourceIP() = %q, want %q", got, want)
+	}
+}
+
+func TestNotificationPagination(t *testing.T) {
+	tests := []struct {
+		path         string
+		wantPage     int
+		wantPageSize int
+		wantError    bool
+	}{
+		{"/api/v1/notifications", 1, 20, false},
+		{"/api/v1/notifications?page=3&pageSize=50", 3, 50, false},
+		{"/api/v1/notifications?page=0", 0, 0, true},
+		{"/api/v1/notifications?pageSize=101", 0, 0, true},
+	}
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			page, pageSize, err := notificationPagination(httptest.NewRequest("GET", test.path, nil))
+			if (err != nil) != test.wantError {
+				t.Fatalf("notificationPagination() error = %v, wantError %v", err, test.wantError)
+			}
+			if !test.wantError && (page != test.wantPage || pageSize != test.wantPageSize) {
+				t.Fatalf("notificationPagination() = (%d, %d), want (%d, %d)", page, pageSize, test.wantPage, test.wantPageSize)
+			}
+		})
+	}
+}
 
 func TestInvalidDNSZonesOnlyReturnsZonesOutsideProviderAllowlist(t *testing.T) {
 	available := []cloudprovider.DNSZone{{Name: "example.com"}, {Name: "aicun-ai.cn"}}

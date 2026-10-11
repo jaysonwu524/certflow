@@ -290,6 +290,29 @@ func (s *Store) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
+// QueuedJobCount is intentionally a small aggregate used by the worker's
+// periodic telemetry refresh. It never returns job payloads or identifiers.
+func (s *Store) QueuedJobCount(ctx context.Context) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM jobs WHERE status = 'queued'`).Scan(&count)
+	return count, err
+}
+
+// CertificateExpiringCounts returns the issued certificate inventory that is
+// within the two operational warning windows. Expired certificates are not
+// counted as "expiring"; their status is tracked through execution failures.
+func (s *Store) CertificateExpiringCounts(ctx context.Context) (within7Days, within30Days int, err error) {
+	err = s.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE v.not_after > now() AND v.not_after <= now() + interval '7 days'),
+			COUNT(*) FILTER (WHERE v.not_after > now() AND v.not_after <= now() + interval '30 days')
+		FROM certificates c
+		JOIN certificate_versions v ON v.id = c.current_certificate_version_id
+		WHERE c.deleted_at IS NULL AND c.status = 'issued'
+	`).Scan(&within7Days, &within30Days)
+	return within7Days, within30Days, err
+}
+
 // ListRealtimeEvents returns a bounded replay stream. Administrators see all
 // events; standard users see only their owned resources.
 func (s *Store) ListRealtimeEvents(ctx context.Context, afterID int64, limit int) ([]domain.RealtimeEvent, error) {
@@ -341,22 +364,47 @@ func (s *Store) PruneRealtimeEvents(ctx context.Context, before time.Time) (int6
 	return result.RowsAffected(), nil
 }
 
-func (s *Store) ListNotifications(ctx context.Context, limit int) ([]domain.Notification, error) {
-	if limit < 1 || limit > 100 {
-		limit = 30
+func (s *Store) ListNotifications(ctx context.Context, query domain.NotificationQuery) (domain.NotificationPage, error) {
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.PageSize < 1 || query.PageSize > 100 {
+		query.PageSize = 20
 	}
 	userID := actorID(ctx)
+	if userID == "" {
+		return domain.NotificationPage{}, errors.New("notification reader is missing")
+	}
+	search := strings.TrimSpace(query.Query)
+	if len(search) > 120 {
+		search = search[:120]
+	}
+	var total, unreadCount int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE r.realtime_event_id IS NULL)
+		FROM realtime_events e
+		LEFT JOIN user_notification_reads r ON r.realtime_event_id = e.id AND r.user_id = $1::uuid
+		WHERE e.owner_user_id = $1::uuid
+		  AND ($2 = '' OR e.topic ILIKE '%' || $2 || '%' OR e.resource_type ILIKE '%' || $2 || '%'
+		       OR e.status ILIKE '%' || $2 || '%' OR COALESCE(e.payload->>'name', '') ILIKE '%' || $2 || '%')
+		  AND (NOT $3 OR r.realtime_event_id IS NULL)
+	`, userID, search, query.Unread).Scan(&total, &unreadCount); err != nil {
+		return domain.NotificationPage{}, err
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT e.id, e.owner_user_id::text, e.topic, e.resource_type, e.resource_id::text,
 			e.status, e.payload, e.created_at, r.read_at
 		FROM realtime_events e
 		LEFT JOIN user_notification_reads r ON r.realtime_event_id = e.id AND r.user_id = $1::uuid
-		WHERE $2 = '' OR e.owner_user_id = $2::uuid
+		WHERE e.owner_user_id = $1::uuid
+		  AND ($2 = '' OR e.topic ILIKE '%' || $2 || '%' OR e.resource_type ILIKE '%' || $2 || '%'
+		       OR e.status ILIKE '%' || $2 || '%' OR COALESCE(e.payload->>'name', '') ILIKE '%' || $2 || '%')
+		  AND (NOT $3 OR r.realtime_event_id IS NULL)
 		ORDER BY e.id DESC
-		LIMIT $3
-	`, userID, ownerID(ctx), limit)
+		LIMIT $4 OFFSET $5
+	`, userID, search, query.Unread, query.PageSize, (query.Page-1)*query.PageSize)
 	if err != nil {
-		return nil, err
+		return domain.NotificationPage{}, err
 	}
 	defer rows.Close()
 	notifications := make([]domain.Notification, 0)
@@ -364,14 +412,17 @@ func (s *Store) ListNotifications(ctx context.Context, limit int) ([]domain.Noti
 		var notification domain.Notification
 		var payload []byte
 		if err := rows.Scan(&notification.ID, &notification.OwnerUserID, &notification.Topic, &notification.ResourceType, &notification.ResourceID, &notification.Status, &payload, &notification.CreatedAt, &notification.ReadAt); err != nil {
-			return nil, err
+			return domain.NotificationPage{}, err
 		}
 		if err := json.Unmarshal(payload, &notification.Payload); err != nil {
-			return nil, err
+			return domain.NotificationPage{}, err
 		}
 		notifications = append(notifications, notification)
 	}
-	return notifications, rows.Err()
+	if err := rows.Err(); err != nil {
+		return domain.NotificationPage{}, err
+	}
+	return domain.NotificationPage{Data: notifications, Page: query.Page, PageSize: query.PageSize, Total: total, UnreadCount: unreadCount}, nil
 }
 
 func (s *Store) MarkNotificationsRead(ctx context.Context, eventIDs []int64) error {
@@ -387,9 +438,27 @@ func (s *Store) MarkNotificationsRead(ctx context.Context, eventIDs []int64) err
 		SELECT $1::uuid, e.id, now()
 		FROM unnest($2::bigint[]) AS requested(id)
 		JOIN realtime_events e ON e.id = requested.id
-		WHERE $3 = '' OR e.owner_user_id = $3::uuid
+		WHERE e.owner_user_id = $3::uuid
 		ON CONFLICT (user_id, realtime_event_id) DO NOTHING
-	`, userID, eventIDs, ownerID(ctx))
+	`, userID, eventIDs, userID)
+	return err
+}
+
+// MarkAllNotificationsRead keeps inbox actions server-side, so a user can
+// clear their whole notification history without loading every page first.
+func (s *Store) MarkAllNotificationsRead(ctx context.Context) error {
+	userID := actorID(ctx)
+	if userID == "" {
+		return errors.New("notification reader is missing")
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO user_notification_reads (user_id, realtime_event_id, read_at)
+		SELECT $1::uuid, e.id, now()
+		FROM realtime_events e
+		LEFT JOIN user_notification_reads r ON r.user_id = $1::uuid AND r.realtime_event_id = e.id
+		WHERE e.owner_user_id = $1::uuid AND r.realtime_event_id IS NULL
+		ON CONFLICT (user_id, realtime_event_id) DO NOTHING
+	`, userID)
 	return err
 }
 
@@ -758,7 +827,7 @@ func (s *Store) AdminDashboard(ctx context.Context) (domain.AdminDashboard, erro
 func (s *Store) ListCertificates(ctx context.Context) ([]domain.CertificateSummary, error) {
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
-		SELECT c.id, c.name, c.status, c.key_algorithm, c.validation_mode, v.not_after, COALESCE(v.sha256_fingerprint, ''), c.last_issued_at, COALESCE(c.last_error, ''), c.created_at,
+		SELECT c.id, c.name, c.status, c.key_algorithm, c.validation_mode, v.not_after, COALESCE(v.sha256_fingerprint, ''), c.last_issued_at, COALESCE(c.last_error, ''), COALESCE(c.last_error_code, ''), c.created_at,
 			COALESCE(array_agg(d.domain ORDER BY d.position) FILTER (WHERE d.id IS NOT NULL), '{}')
 		FROM certificates c
 		LEFT JOIN certificate_versions v ON v.id = c.current_certificate_version_id
@@ -777,7 +846,7 @@ func (s *Store) ListCertificates(ctx context.Context) ([]domain.CertificateSumma
 		var certificate domain.CertificateSummary
 		if err := rows.Scan(
 			&certificate.ID, &certificate.Name, &certificate.Status, &certificate.KeyAlgorithm, &certificate.ValidationMode,
-			&certificate.NotAfter, &certificate.Fingerprint, &certificate.LastIssuedAt, &certificate.LastError, &certificate.CreatedAt, &certificate.Domains,
+			&certificate.NotAfter, &certificate.Fingerprint, &certificate.LastIssuedAt, &certificate.LastError, &certificate.LastErrorCode, &certificate.CreatedAt, &certificate.Domains,
 		); err != nil {
 			return nil, err
 		}
@@ -792,7 +861,7 @@ func (s *Store) GetCertificate(ctx context.Context, certificateID string) (domai
 	err := s.pool.QueryRow(ctx, `
 		SELECT c.id, c.name, c.status, c.key_algorithm, c.validation_mode,
 			v.not_after, COALESCE(v.sha256_fingerprint, ''), c.last_issued_at,
-			COALESCE(c.last_error, ''), c.created_at,
+			COALESCE(c.last_error, ''), COALESCE(c.last_error_code, ''), c.created_at,
 			COALESCE(c.acme_account_id::text, ''), COALESCE(c.default_dns_account_id::text, ''),
 			c.renew_before_days,
 			COALESCE(array_agg(d.domain ORDER BY d.position) FILTER (WHERE d.id IS NOT NULL), '{}')
@@ -804,7 +873,7 @@ func (s *Store) GetCertificate(ctx context.Context, certificateID string) (domai
 	`, certificateID, ownerID(ctx)).Scan(
 		&certificate.ID, &certificate.Name, &certificate.Status, &certificate.KeyAlgorithm,
 		&certificate.ValidationMode, &certificate.NotAfter, &certificate.Fingerprint,
-		&certificate.LastIssuedAt, &certificate.LastError, &certificate.CreatedAt,
+		&certificate.LastIssuedAt, &certificate.LastError, &certificate.LastErrorCode, &certificate.CreatedAt,
 		&certificate.AcmeAccountID, &certificate.DefaultDNSAccountID, &certificate.RenewBeforeDays,
 		&certificate.Domains,
 	)
@@ -941,7 +1010,7 @@ func (s *Store) QueueCertificateIssue(ctx context.Context, certificateID string)
 	`, jobID, certificateID, "manual:"+id.New()); err != nil {
 		return "", err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE certificates SET status = 'pending', last_error = NULL, updated_at = now() WHERE id = $1`, certificateID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE certificates SET status = 'pending', last_error = NULL, last_error_code = NULL, updated_at = now() WHERE id = $1`, certificateID); err != nil {
 		return "", err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -1155,7 +1224,7 @@ func (s *Store) ListAutomationTasks(ctx context.Context) ([]domain.AutomationTas
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
 		SELECT a.id, a.name, a.certificate_id, c.name, a.action_type, a.interval_minutes, a.enabled,
-			a.next_run_at, a.last_run_at, a.last_status, COALESCE(a.last_error, ''),
+			a.next_run_at, a.last_run_at, a.last_status, COALESCE(a.last_error, ''), COALESCE(a.last_error_code, ''),
 			(SELECT count(*) FROM automation_task_targets t WHERE t.automation_task_id = a.id AND t.enabled),
 			COALESCE(a.cloud_credential_id::text, ''),
 			COALESCE((SELECT array_agg(t.deployment_target_id::text ORDER BY t.position) FROM automation_task_targets t WHERE t.automation_task_id = a.id AND t.enabled), '{}'), a.created_at
@@ -1169,7 +1238,7 @@ func (s *Store) ListAutomationTasks(ctx context.Context) ([]domain.AutomationTas
 	items := make([]domain.AutomationTaskSummary, 0)
 	for rows.Next() {
 		var item domain.AutomationTaskSummary
-		if err := rows.Scan(&item.ID, &item.Name, &item.CertificateID, &item.CertificateName, &item.ActionType, &item.IntervalMinutes, &item.Enabled, &item.NextRunAt, &item.LastRunAt, &item.LastStatus, &item.LastError, &item.TargetCount, &item.CloudCredentialID, &item.TargetIDs, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.CertificateID, &item.CertificateName, &item.ActionType, &item.IntervalMinutes, &item.Enabled, &item.NextRunAt, &item.LastRunAt, &item.LastStatus, &item.LastError, &item.LastErrorCode, &item.TargetCount, &item.CloudCredentialID, &item.TargetIDs, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -1181,12 +1250,12 @@ func (s *Store) GetAutomationTask(ctx context.Context, taskID string) (domain.Au
 	var item domain.AutomationTaskSummary
 	err := s.pool.QueryRow(ctx, `
 		SELECT a.id, a.name, a.certificate_id, c.name, a.action_type, a.interval_minutes, a.enabled,
-			a.next_run_at, a.last_run_at, a.last_status, COALESCE(a.last_error, ''),
+			a.next_run_at, a.last_run_at, a.last_status, COALESCE(a.last_error, ''), COALESCE(a.last_error_code, ''),
 			(SELECT count(*) FROM automation_task_targets t WHERE t.automation_task_id = a.id AND t.enabled),
 			COALESCE(a.cloud_credential_id::text, ''), COALESCE((SELECT array_agg(t.deployment_target_id::text ORDER BY t.position) FROM automation_task_targets t WHERE t.automation_task_id = a.id AND t.enabled), '{}'), a.created_at
 		FROM automation_tasks a JOIN certificates c ON c.id = a.certificate_id
 		WHERE a.id = $1 AND a.deleted_at IS NULL AND ($2 = '' OR a.owner_user_id = $2::uuid)
-	`, taskID, ownerID(ctx)).Scan(&item.ID, &item.Name, &item.CertificateID, &item.CertificateName, &item.ActionType, &item.IntervalMinutes, &item.Enabled, &item.NextRunAt, &item.LastRunAt, &item.LastStatus, &item.LastError, &item.TargetCount, &item.CloudCredentialID, &item.TargetIDs, &item.CreatedAt)
+	`, taskID, ownerID(ctx)).Scan(&item.ID, &item.Name, &item.CertificateID, &item.CertificateName, &item.ActionType, &item.IntervalMinutes, &item.Enabled, &item.NextRunAt, &item.LastRunAt, &item.LastStatus, &item.LastError, &item.LastErrorCode, &item.TargetCount, &item.CloudCredentialID, &item.TargetIDs, &item.CreatedAt)
 	return item, err
 }
 
@@ -1196,7 +1265,7 @@ func (s *Store) ListAutomationRuns(ctx context.Context, taskID string, limit int
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.automation_task_id, r.certificate_id, COALESCE(r.certificate_version_id::text, ''), r.trigger_type, r.status,
-			r.total_jobs, r.succeeded_jobs, r.failed_jobs, r.started_at, r.finished_at, COALESCE(r.last_error, ''), r.created_at
+			r.total_jobs, r.succeeded_jobs, r.failed_jobs, r.started_at, r.finished_at, COALESCE(r.last_error, ''), COALESCE(r.last_error_code, ''), r.created_at
 		FROM automation_runs r
 		JOIN automation_tasks a ON a.id = r.automation_task_id
 		WHERE r.automation_task_id = $1 AND ($2 = '' OR a.owner_user_id = $2::uuid)
@@ -1210,7 +1279,7 @@ func (s *Store) ListAutomationRuns(ctx context.Context, taskID string, limit int
 	runs := make([]domain.AutomationRunSummary, 0)
 	for rows.Next() {
 		var run domain.AutomationRunSummary
-		if err := rows.Scan(&run.ID, &run.AutomationTaskID, &run.CertificateID, &run.CertificateVersionID, &run.TriggerType, &run.Status, &run.TotalJobs, &run.SucceededJobs, &run.FailedJobs, &run.StartedAt, &run.FinishedAt, &run.LastError, &run.CreatedAt); err != nil {
+		if err := rows.Scan(&run.ID, &run.AutomationTaskID, &run.CertificateID, &run.CertificateVersionID, &run.TriggerType, &run.Status, &run.TotalJobs, &run.SucceededJobs, &run.FailedJobs, &run.StartedAt, &run.FinishedAt, &run.LastError, &run.LastErrorCode, &run.CreatedAt); err != nil {
 			return nil, err
 		}
 		runs = append(runs, run)
@@ -1225,7 +1294,14 @@ func (s *Store) UpdateAutomationTask(ctx context.Context, taskID string, input d
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	owner := ownerID(ctx)
-	result, err := tx.Exec(ctx, `UPDATE automation_tasks SET name = $2, certificate_id = $3, action_type = $4, interval_minutes = $5, cloud_credential_id = NULLIF($6, '')::uuid, enabled = $7, config_version = config_version + 1, updated_at = now() WHERE id = $1 AND deleted_at IS NULL AND ($8 = '' OR owner_user_id = $8::uuid)`, taskID, input.Name, input.CertificateID, input.ActionType, input.IntervalMinutes, input.CloudCredentialID, input.Enabled, owner)
+	result, err := tx.Exec(ctx, `
+		UPDATE automation_tasks
+		SET name = $2, certificate_id = $3, action_type = $4, interval_minutes = $5,
+			cloud_credential_id = NULLIF($6, '')::uuid, enabled = $7,
+			next_run_at = now() + ($5::int * interval '1 minute'),
+			config_version = config_version + 1, updated_at = now()
+		WHERE id = $1 AND deleted_at IS NULL AND ($8 = '' OR owner_user_id = $8::uuid)
+	`, taskID, input.Name, input.CertificateID, input.ActionType, input.IntervalMinutes, input.CloudCredentialID, input.Enabled, owner)
 	if err != nil {
 		var databaseError *pgconn.PgError
 		if errors.As(err, &databaseError) && databaseError.Code == "23505" && (databaseError.ConstraintName == "automation_tasks_name_key" || databaseError.ConstraintName == "automation_tasks_owner_name_key") {
@@ -1476,7 +1552,7 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 	if task.ActionType != "renew_certificate" {
 		if err := tx.QueryRow(ctx, `SELECT current_certificate_version_id::text FROM certificates WHERE id = $1 AND deleted_at IS NULL AND current_certificate_version_id IS NOT NULL`, task.CertificateID).Scan(&versionID); err != nil {
 			if err == pgx.ErrNoRows {
-				if _, updateErr := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'skipped', last_error = 'waiting for an issued certificate', updated_at = now() WHERE id = $1`, task.ID); updateErr != nil {
+				if _, updateErr := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'skipped', last_error = 'waiting for an issued certificate', last_error_code = 'certificate_unavailable', updated_at = now() WHERE id = $1`, task.ID); updateErr != nil {
 					return AutomationRunQueueResult{}, updateErr
 				}
 				if err := tx.Commit(ctx); err != nil {
@@ -1552,7 +1628,7 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 	default:
 		return AutomationRunQueueResult{}, fmt.Errorf("unsupported automation action %q", task.ActionType)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'queued', last_error = NULL, last_run_at = now(), updated_at = now() WHERE id = $1`, task.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'queued', last_error = NULL, last_error_code = NULL, last_run_at = now(), updated_at = now() WHERE id = $1`, task.ID); err != nil {
 		return AutomationRunQueueResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1562,6 +1638,18 @@ func (s *Store) QueueAutomationRun(ctx context.Context, taskID string) (Automati
 }
 
 func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
+	queued, err := s.queueDueRenewalAutomationTasks(ctx)
+	if err != nil {
+		return queued, err
+	}
+	deliveryQueued, err := s.queueDueDeliveryAutomationTasks(ctx)
+	return queued + deliveryQueued, err
+}
+
+// queueDueRenewalAutomationTasks schedules only certificates that have entered
+// their configured renewal window. Due checks outside the window still advance
+// the task clock, preventing a scheduler scan from repeatedly selecting them.
+func (s *Store) queueDueRenewalAutomationTasks(ctx context.Context) (int, error) {
 	queued := 0
 	for {
 		tx, err := s.pool.Begin(ctx)
@@ -1578,13 +1666,6 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 			JOIN certificate_versions v ON v.id = c.current_certificate_version_id
 			WHERE a.enabled AND a.deleted_at IS NULL AND a.action_type = 'renew_certificate' AND a.next_run_at <= now()
 			  AND c.deleted_at IS NULL
-			  AND v.not_after <= now() + (c.renew_before_days * interval '1 day')
-			  AND NOT EXISTS (
-				SELECT 1 FROM jobs j
-				WHERE j.kind IN ('issue', 'renew')
-				  AND j.status IN ('queued', 'running')
-				  AND j.payload->>'certificate_id' = c.id::text
-			  )
 			ORDER BY a.next_run_at
 			FOR UPDATE OF a SKIP LOCKED
 			LIMIT 1
@@ -1596,6 +1677,38 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 		if err != nil {
 			_ = tx.Rollback(ctx)
 			return 0, err
+		}
+
+		var inRenewalWindow, jobActive bool
+		if err := tx.QueryRow(ctx, `
+			SELECT v.not_after <= now() + (c.renew_before_days * interval '1 day'),
+				EXISTS (
+					SELECT 1 FROM jobs j
+					WHERE j.kind IN ('issue', 'renew') AND j.status IN ('queued', 'running')
+						AND j.payload->>'certificate_id' = c.id::text
+				)
+			FROM certificates c JOIN certificate_versions v ON v.id = c.current_certificate_version_id
+			WHERE c.id = $1
+		`, certificateID).Scan(&inRenewalWindow, &jobActive); err != nil {
+			_ = tx.Rollback(ctx)
+			return queued, err
+		}
+		if !inRenewalWindow || jobActive {
+			if _, err := tx.Exec(ctx, `
+				UPDATE automation_tasks
+				SET last_status = CASE WHEN $2 THEN 'queued' ELSE 'skipped' END,
+					last_error = CASE WHEN $2 THEN 'waiting for an active certificate job' ELSE NULL END,
+					last_error_code = CASE WHEN $2 THEN 'automation_run_in_progress' ELSE NULL END,
+					last_run_at = now(), next_run_at = now() + ($3 * interval '1 minute'), updated_at = now()
+				WHERE id = $1
+			`, taskID, jobActive, interval); err != nil {
+				_ = tx.Rollback(ctx)
+				return queued, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return queued, err
+			}
+			continue
 		}
 
 		runID := id.New()
@@ -1615,7 +1728,7 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE automation_tasks
-			SET last_status = 'queued', last_error = NULL, last_run_at = now(),
+			SET last_status = 'queued', last_error = NULL, last_error_code = NULL, last_run_at = now(),
 				next_run_at = now() + ($2 * interval '1 minute'), updated_at = now()
 			WHERE id = $1
 		`, taskID, interval); err != nil {
@@ -1626,6 +1739,146 @@ func (s *Store) QueueDueAutomationTasks(ctx context.Context) (int, error) {
 			return 0, err
 		}
 		queued++
+	}
+	return queued, nil
+}
+
+// queueDueDeliveryAutomationTasks periodically reconciles a certificate's
+// current version with its cloud certificate asset or ALB listeners. The same
+// idempotency scope used by manual and certificate-issued runs makes duplicate
+// scheduler scans and multiple control-plane replicas safe.
+func (s *Store) queueDueDeliveryAutomationTasks(ctx context.Context) (int, error) {
+	queued := 0
+	for {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return queued, err
+		}
+		var taskID, certificateID, versionID, actionType, credentialID string
+		var interval int
+		err = tx.QueryRow(ctx, `
+			SELECT a.id, a.certificate_id, c.current_certificate_version_id::text, a.action_type,
+				COALESCE(a.cloud_credential_id::text, ''), a.interval_minutes
+			FROM automation_tasks a
+			JOIN certificates c ON c.id = a.certificate_id AND c.current_certificate_version_id IS NOT NULL
+			WHERE a.enabled AND a.deleted_at IS NULL AND a.action_type IN ('upload_ssl', 'deploy_alb')
+				AND a.next_run_at <= now() AND c.deleted_at IS NULL
+			ORDER BY a.next_run_at
+			FOR UPDATE OF a SKIP LOCKED
+			LIMIT 1
+		`).Scan(&taskID, &certificateID, &versionID, &actionType, &credentialID, &interval)
+		if err == pgx.ErrNoRows {
+			_ = tx.Rollback(ctx)
+			break
+		}
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return queued, err
+		}
+
+		var running bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM automation_runs WHERE automation_task_id = $1 AND status IN ('queued', 'running', 'waiting_user'))`, taskID).Scan(&running); err != nil {
+			_ = tx.Rollback(ctx)
+			return queued, err
+		}
+		if running {
+			if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'queued', last_error = 'automation run is still in progress', last_error_code = 'automation_run_in_progress', last_run_at = now(), next_run_at = now() + ($2 * interval '1 minute'), updated_at = now() WHERE id = $1`, taskID, interval); err != nil {
+				_ = tx.Rollback(ctx)
+				return queued, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return queued, err
+			}
+			continue
+		}
+
+		targetIDs := make([]string, 0)
+		if actionType == "deploy_alb" {
+			rows, err := tx.Query(ctx, `SELECT deployment_target_id::text FROM automation_task_targets WHERE automation_task_id = $1 AND enabled ORDER BY position`, taskID)
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				return queued, err
+			}
+			for rows.Next() {
+				var targetID string
+				if err := rows.Scan(&targetID); err != nil {
+					rows.Close()
+					_ = tx.Rollback(ctx)
+					return queued, err
+				}
+				targetIDs = append(targetIDs, targetID)
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				_ = tx.Rollback(ctx)
+				return queued, err
+			}
+			rows.Close()
+			if len(targetIDs) == 0 {
+				if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'failed', last_error = 'automation task has no enabled deployment targets', last_error_code = 'deployment_failed', last_run_at = now(), next_run_at = now() + ($2 * interval '1 minute'), updated_at = now() WHERE id = $1`, taskID, interval); err != nil {
+					_ = tx.Rollback(ctx)
+					return queued, err
+				}
+				if err := tx.Commit(ctx); err != nil {
+					return queued, err
+				}
+				continue
+			}
+		}
+
+		runID := id.New()
+		totalJobs := 1
+		if actionType == "deploy_alb" {
+			totalJobs = len(targetIDs)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO automation_runs (id, automation_task_id, certificate_id, certificate_version_id, trigger_type, status, total_jobs) VALUES ($1, $2, $3, $4, 'scheduler', 'queued', $5)`, runID, taskID, certificateID, versionID, totalJobs); err != nil {
+			_ = tx.Rollback(ctx)
+			return queued, err
+		}
+		queuedJobs := 0
+		if actionType == "upload_ssl" {
+			result, err := tx.Exec(ctx, `
+				INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
+				VALUES ($1, 'upload', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'cloud_credential_id', $5::text), $7::uuid, $6::uuid, now(), 0, 5)
+				ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
+			`, id.New(), taskID, "scheduler:"+runID, certificateID, credentialID, runID, taskID)
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				return queued, err
+			}
+			queuedJobs = int(result.RowsAffected())
+		} else {
+			for _, targetID := range targetIDs {
+				result, err := tx.Exec(ctx, `
+					INSERT INTO jobs (id, kind, status, idempotency_scope, idempotency_key, payload, automation_task_id, automation_run_id, next_run_at, attempt, max_attempts)
+					VALUES ($1, 'deploy', 'queued', $2, $3, jsonb_build_object('certificate_id', $4::text, 'deployment_target_id', $5::text), $7::uuid, $6::uuid, now(), 0, 5)
+					ON CONFLICT (idempotency_scope, idempotency_key) DO NOTHING
+				`, id.New(), taskID, "scheduler:"+runID+":"+targetID, certificateID, targetID, runID, taskID)
+				if err != nil {
+					_ = tx.Rollback(ctx)
+					return queued, err
+				}
+				queuedJobs += int(result.RowsAffected())
+			}
+		}
+		if queuedJobs == 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM automation_runs WHERE id = $1`, runID); err != nil {
+				_ = tx.Rollback(ctx)
+				return queued, err
+			}
+		}
+		status, message, errorCode := "queued", "", ""
+		if queuedJobs == 0 {
+			status, message, errorCode = "skipped", "the current certificate version is already queued or synchronized", "automation_run_in_progress"
+		}
+		if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = $2, last_error = NULLIF($3, ''), last_error_code = NULLIF($4, ''), last_run_at = now(), next_run_at = now() + ($5 * interval '1 minute'), updated_at = now() WHERE id = $1`, taskID, status, message, errorCode, interval); err != nil {
+			_ = tx.Rollback(ctx)
+			return queued, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return queued, err
+		}
+		queued += queuedJobs
 	}
 	return queued, nil
 }
@@ -1715,7 +1968,7 @@ func (s *Store) ConsumeManualChallenge(ctx context.Context, jobID string) error 
 func (s *Store) ListCloudCredentials(ctx context.Context) ([]domain.CloudCredentialSummary, error) {
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, name, description, provider, access_key_id, credential_hint, status, last_verified_at, COALESCE(last_error, ''), created_at
+		SELECT id, name, description, provider, access_key_id, credential_hint, status, last_verified_at, COALESCE(last_error, ''), COALESCE(last_error_code, ''), created_at
 		FROM cloud_credentials
 		WHERE deleted_at IS NULL AND ($1 = '' OR owner_user_id = $1::uuid)
 		ORDER BY created_at DESC
@@ -1728,7 +1981,7 @@ func (s *Store) ListCloudCredentials(ctx context.Context) ([]domain.CloudCredent
 	credentials := make([]domain.CloudCredentialSummary, 0)
 	for rows.Next() {
 		var credential domain.CloudCredentialSummary
-		if err := rows.Scan(&credential.ID, &credential.Name, &credential.Description, &credential.Provider, &credential.AccessKeyID, &credential.CredentialHint, &credential.Status, &credential.LastVerifiedAt, &credential.LastError, &credential.CreatedAt); err != nil {
+		if err := rows.Scan(&credential.ID, &credential.Name, &credential.Description, &credential.Provider, &credential.AccessKeyID, &credential.CredentialHint, &credential.Status, &credential.LastVerifiedAt, &credential.LastError, &credential.LastErrorCode, &credential.CreatedAt); err != nil {
 			return nil, err
 		}
 		credentials = append(credentials, credential)
@@ -1771,12 +2024,12 @@ func (s *Store) CreateCloudCredential(ctx context.Context, credentialID, version
 func (s *Store) GetCloudCredential(ctx context.Context, credentialID string) (domain.CloudCredentialSummary, error) {
 	var credential domain.CloudCredentialSummary
 	err := s.pool.QueryRow(ctx, `
-		SELECT id, name, description, provider, access_key_id, credential_hint, status, last_verified_at, COALESCE(last_error, ''), created_at
+		SELECT id, name, description, provider, access_key_id, credential_hint, status, last_verified_at, COALESCE(last_error, ''), COALESCE(last_error_code, ''), created_at
 		FROM cloud_credentials
 		WHERE id = $1 AND deleted_at IS NULL AND ($2 = '' OR owner_user_id = $2::uuid)
 	`, credentialID, ownerID(ctx)).Scan(
 		&credential.ID, &credential.Name, &credential.Description, &credential.Provider, &credential.AccessKeyID, &credential.CredentialHint,
-		&credential.Status, &credential.LastVerifiedAt, &credential.LastError, &credential.CreatedAt,
+		&credential.Status, &credential.LastVerifiedAt, &credential.LastError, &credential.LastErrorCode, &credential.CreatedAt,
 	)
 	return credential, err
 }
@@ -1795,6 +2048,7 @@ func (s *Store) RecordCloudCredentialVerification(ctx context.Context, credentia
 		END,
 			last_verified_at = now(),
 			last_error = NULLIF($3, ''),
+			last_error_code = CASE WHEN $2 THEN NULL ELSE 'cloud_credential_verification_failed' END,
 			updated_at = now()
 		WHERE id = $1 AND deleted_at IS NULL AND ($4 = '' OR owner_user_id = $4::uuid)
 		RETURNING status
@@ -1802,7 +2056,7 @@ func (s *Store) RecordCloudCredentialVerification(ctx context.Context, credentia
 	if err == nil && !valid {
 		_, _ = s.pool.Exec(ctx, `
 			UPDATE dns_accounts
-			SET status = 'invalid', last_error = 'the referenced cloud credential failed verification', updated_at = now()
+			SET status = 'invalid', last_error = 'the referenced cloud credential failed verification', last_error_code = 'cloud_credential_unavailable', updated_at = now()
 			WHERE cloud_credential_id = $1 AND deleted_at IS NULL AND ($2 = '' OR owner_user_id = $2::uuid)
 		`, credentialID, ownerID(ctx))
 	}
@@ -1811,7 +2065,7 @@ func (s *Store) RecordCloudCredentialVerification(ctx context.Context, credentia
 
 func (s *Store) SetCloudCredentialStatus(ctx context.Context, credentialID, status string) error {
 	result, err := s.pool.Exec(ctx, `
-		UPDATE cloud_credentials SET status = $2, last_error = NULL, updated_at = now()
+		UPDATE cloud_credentials SET status = $2, last_error = NULL, last_error_code = NULL, updated_at = now()
 		WHERE id = $1 AND deleted_at IS NULL AND ($3 = '' OR owner_user_id = $3::uuid)
 	`, credentialID, status, ownerID(ctx))
 	if err != nil {
@@ -1921,7 +2175,7 @@ func (s *Store) ListACMEAccounts(ctx context.Context) ([]domain.ACMEAccountSumma
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
 		SELECT a.id, a.name, a.directory_url, COALESCE(a.account_url, ''), a.email, a.private_key_algorithm, a.status,
-			a.last_verified_at, COALESCE(a.last_error, ''),
+			a.last_verified_at, COALESCE(a.last_error, ''), COALESCE(a.last_error_code, ''),
 			(SELECT count(*) FROM certificates c WHERE c.acme_account_id = a.id AND c.deleted_at IS NULL),
 			(SELECT count(*) FROM automation_tasks t JOIN certificates c ON c.id = t.certificate_id
 			 WHERE c.acme_account_id = a.id AND c.deleted_at IS NULL AND t.deleted_at IS NULL),
@@ -1939,7 +2193,7 @@ func (s *Store) ListACMEAccounts(ctx context.Context) ([]domain.ACMEAccountSumma
 	for rows.Next() {
 		var account domain.ACMEAccountSummary
 		if err := rows.Scan(&account.ID, &account.Name, &account.DirectoryURL, &account.AccountURL, &account.Email, &account.PrivateKeyAlgorithm, &account.Status,
-			&account.LastVerifiedAt, &account.LastError, &account.CertificateCount, &account.AutomationCount, &account.CreatedAt); err != nil {
+			&account.LastVerifiedAt, &account.LastError, &account.LastErrorCode, &account.CertificateCount, &account.AutomationCount, &account.CreatedAt); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, account)
@@ -1959,7 +2213,7 @@ func (s *Store) GetACMEAccount(ctx context.Context, accountID string) (domain.AC
 	var account domain.ACMEAccountSummary
 	err := s.pool.QueryRow(ctx, `
 		SELECT a.id, a.name, a.directory_url, COALESCE(a.account_url, ''), a.email, a.private_key_algorithm, a.status,
-			a.last_verified_at, COALESCE(a.last_error, ''),
+			a.last_verified_at, COALESCE(a.last_error, ''), COALESCE(a.last_error_code, ''),
 			(SELECT count(*) FROM certificates c WHERE c.acme_account_id = a.id AND c.deleted_at IS NULL),
 			(SELECT count(*) FROM automation_tasks t JOIN certificates c ON c.id = t.certificate_id
 			 WHERE c.acme_account_id = a.id AND c.deleted_at IS NULL AND t.deleted_at IS NULL),
@@ -1967,7 +2221,7 @@ func (s *Store) GetACMEAccount(ctx context.Context, accountID string) (domain.AC
 		FROM acme_accounts a
 		WHERE a.id = $1 AND a.deleted_at IS NULL AND ($2 = '' OR a.owner_user_id = $2::uuid)
 	`, accountID, ownerID(ctx)).Scan(&account.ID, &account.Name, &account.DirectoryURL, &account.AccountURL, &account.Email, &account.PrivateKeyAlgorithm, &account.Status,
-		&account.LastVerifiedAt, &account.LastError, &account.CertificateCount, &account.AutomationCount, &account.CreatedAt)
+		&account.LastVerifiedAt, &account.LastError, &account.LastErrorCode, &account.CertificateCount, &account.AutomationCount, &account.CreatedAt)
 	return account, err
 }
 
@@ -2011,7 +2265,9 @@ func (s *Store) LoadACMEAccountMaterial(ctx context.Context, accountID string) (
 func (s *Store) SetACMEAccountVerification(ctx context.Context, accountID, status, lastError, accountURL string) error {
 	result, err := s.pool.Exec(ctx, `
 		UPDATE acme_accounts
-		SET status = $2, last_error = $3, account_url = COALESCE(NULLIF($4, ''), account_url),
+		SET status = $2, last_error = $3,
+			last_error_code = CASE WHEN $2 = 'active' THEN NULL ELSE 'acme_account_verification_failed' END,
+			account_url = COALESCE(NULLIF($4, ''), account_url),
 			last_verified_at = CASE WHEN $2 = 'active' THEN now() ELSE last_verified_at END, updated_at = now()
 		WHERE id = $1 AND deleted_at IS NULL AND ($5 = '' OR owner_user_id = $5::uuid)
 	`, accountID, status, lastError, accountURL, ownerID(ctx))
@@ -2046,7 +2302,7 @@ func (s *Store) ListDNSAccounts(ctx context.Context) ([]domain.DNSAccountSummary
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, name, description, provider, cloud_credential_id, allowed_zones, status, last_verified_at,
-			COALESCE(last_error, ''), COALESCE(verified_credential_version_id::text, ''), created_at
+			COALESCE(last_error, ''), COALESCE(last_error_code, ''), COALESCE(verified_credential_version_id::text, ''), created_at
 		FROM dns_accounts
 		WHERE deleted_at IS NULL AND ($1 = '' OR owner_user_id = $1::uuid)
 		ORDER BY created_at DESC
@@ -2059,7 +2315,7 @@ func (s *Store) ListDNSAccounts(ctx context.Context) ([]domain.DNSAccountSummary
 	accounts := make([]domain.DNSAccountSummary, 0)
 	for rows.Next() {
 		var account domain.DNSAccountSummary
-		if err := rows.Scan(&account.ID, &account.Name, &account.Description, &account.Provider, &account.CloudCredentialID, &account.AllowedZones, &account.Status, &account.LastVerifiedAt, &account.LastError, &account.VerifiedCredentialVersionID, &account.CreatedAt); err != nil {
+		if err := rows.Scan(&account.ID, &account.Name, &account.Description, &account.Provider, &account.CloudCredentialID, &account.AllowedZones, &account.Status, &account.LastVerifiedAt, &account.LastError, &account.LastErrorCode, &account.VerifiedCredentialVersionID, &account.CreatedAt); err != nil {
 			return nil, err
 		}
 		accounts = append(accounts, account)
@@ -2084,10 +2340,10 @@ func (s *Store) GetDNSAccount(ctx context.Context, accountID string) (domain.DNS
 	var account domain.DNSAccountSummary
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, name, description, provider, cloud_credential_id, allowed_zones, status, last_verified_at,
-			COALESCE(last_error, ''), COALESCE(verified_credential_version_id::text, ''), created_at
+			COALESCE(last_error, ''), COALESCE(last_error_code, ''), COALESCE(verified_credential_version_id::text, ''), created_at
 		FROM dns_accounts
 		WHERE id = $1 AND deleted_at IS NULL AND ($2 = '' OR owner_user_id = $2::uuid)
-	`, accountID, ownerID(ctx)).Scan(&account.ID, &account.Name, &account.Description, &account.Provider, &account.CloudCredentialID, &account.AllowedZones, &account.Status, &account.LastVerifiedAt, &account.LastError, &account.VerifiedCredentialVersionID, &account.CreatedAt)
+	`, accountID, ownerID(ctx)).Scan(&account.ID, &account.Name, &account.Description, &account.Provider, &account.CloudCredentialID, &account.AllowedZones, &account.Status, &account.LastVerifiedAt, &account.LastError, &account.LastErrorCode, &account.VerifiedCredentialVersionID, &account.CreatedAt)
 	return account, err
 }
 
@@ -2157,6 +2413,7 @@ func (s *Store) SetDNSAccountVerification(ctx context.Context, accountID, status
 		UPDATE dns_accounts
 		SET status = $2,
 			last_error = NULLIF($3, ''),
+			last_error_code = CASE WHEN $2 = 'active' THEN NULL ELSE 'dns_account_verification_failed' END,
 			last_verified_at = now(),
 			verified_credential_version_id = CASE WHEN $2 = 'active' THEN NULLIF($4, '')::uuid ELSE verified_credential_version_id END,
 			updated_at = now()
@@ -2259,7 +2516,7 @@ func (s *Store) CreateDeploymentTarget(ctx context.Context, targetID string, inp
 func (s *Store) ListCertificateDeployments(ctx context.Context) ([]domain.CertificateDeploymentSummary, error) {
 	owner := ownerID(ctx)
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.id, d.certificate_id, d.deployment_target_id, t.name, d.auto_deploy, d.enabled, d.last_deployed_at, COALESCE(d.last_error, '')
+		SELECT d.id, d.certificate_id, d.deployment_target_id, t.name, d.auto_deploy, d.enabled, d.last_deployed_at, COALESCE(d.last_error, ''), COALESCE(d.last_error_code, '')
 		FROM certificate_deployments d JOIN deployment_targets t ON t.id = d.deployment_target_id
 		WHERE ($1 = '' OR d.owner_user_id = $1::uuid)
 		ORDER BY d.created_at DESC
@@ -2271,7 +2528,7 @@ func (s *Store) ListCertificateDeployments(ctx context.Context) ([]domain.Certif
 	items := make([]domain.CertificateDeploymentSummary, 0)
 	for rows.Next() {
 		var item domain.CertificateDeploymentSummary
-		if err := rows.Scan(&item.ID, &item.CertificateID, &item.TargetID, &item.TargetName, &item.AutoDeploy, &item.Enabled, &item.LastDeployedAt, &item.LastError); err != nil {
+		if err := rows.Scan(&item.ID, &item.CertificateID, &item.TargetID, &item.TargetName, &item.AutoDeploy, &item.Enabled, &item.LastDeployedAt, &item.LastError, &item.LastErrorCode); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -2411,13 +2668,13 @@ func (s *Store) WithCertificateCloudAssetLock(ctx context.Context, versionID, cr
 }
 
 func (s *Store) MarkAutomationUploadSucceeded(ctx context.Context, taskID, versionID, remoteCertificateID string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE automation_tasks SET remote_certificate_id = $2, last_uploaded_version_id = $3, last_status = 'succeeded', last_error = NULL, updated_at = now() WHERE id = $1`, taskID, remoteCertificateID, versionID)
+	_, err := s.pool.Exec(ctx, `UPDATE automation_tasks SET remote_certificate_id = $2, last_uploaded_version_id = $3, last_status = 'succeeded', last_error = NULL, last_error_code = NULL, updated_at = now() WHERE id = $1`, taskID, remoteCertificateID, versionID)
 	return err
 }
 
 func (s *Store) MarkDeploymentSucceeded(ctx context.Context, certificateID, targetID, versionID, remoteCertificateID string) error {
 	_, err := s.pool.Exec(ctx, `
-		UPDATE certificate_deployments SET last_deployed_fingerprint = v.sha256_fingerprint, last_deployed_version_id = v.id, remote_certificate_id = $4, last_deployed_at = now(), last_error = NULL, updated_at = now()
+		UPDATE certificate_deployments SET last_deployed_fingerprint = v.sha256_fingerprint, last_deployed_version_id = v.id, remote_certificate_id = $4, last_deployed_at = now(), last_error = NULL, last_error_code = NULL, updated_at = now()
 		FROM certificate_versions v
 		WHERE certificate_deployments.certificate_id = $1 AND certificate_deployments.deployment_target_id = $2 AND v.id = $3
 	`, certificateID, targetID, versionID, remoteCertificateID)
@@ -2425,7 +2682,7 @@ func (s *Store) MarkDeploymentSucceeded(ctx context.Context, certificateID, targ
 }
 
 func (s *Store) MarkDeploymentFailed(ctx context.Context, certificateID, targetID, message string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE certificate_deployments SET last_error = $3, updated_at = now() WHERE certificate_id = $1 AND deployment_target_id = $2`, certificateID, targetID, truncateError(message))
+	_, err := s.pool.Exec(ctx, `UPDATE certificate_deployments SET last_error = $3, last_error_code = 'deployment_failed', updated_at = now() WHERE certificate_id = $1 AND deployment_target_id = $2`, certificateID, targetID, truncateError(message))
 	return err
 }
 
@@ -2498,7 +2755,7 @@ func (s *Store) SaveCertificateVersion(ctx context.Context, material Certificate
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE certificates
-		SET current_certificate_version_id = $2, status = 'issued', last_issued_at = now(), last_error = NULL,
+		SET current_certificate_version_id = $2, status = 'issued', last_issued_at = now(), last_error = NULL, last_error_code = NULL,
 			version = version + 1, updated_at = now()
 		WHERE id = $1 AND deleted_at IS NULL
 	`, material.CertificateID, material.ID); err != nil {
@@ -2618,7 +2875,7 @@ func (s *Store) SaveCertificateVersion(ctx context.Context, material Certificate
 		if _, err := tx.Exec(ctx, `UPDATE automation_runs SET total_jobs = $2, updated_at = now() WHERE id = $1`, runID, queuedJobs); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'queued', last_error = NULL, last_run_at = now(), updated_at = now() WHERE id = $1`, task.id); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'queued', last_error = NULL, last_error_code = NULL, last_run_at = now(), updated_at = now() WHERE id = $1`, task.id); err != nil {
 			return err
 		}
 	}
@@ -2776,7 +3033,7 @@ func (s *Store) RecoverExpiredJobs(ctx context.Context, retryDelay time.Duration
 						WHEN $2::text = 'renew' AND current_certificate_version_id IS NOT NULL THEN 'issued'
 							ELSE status
 						END,
-						last_error = 'worker lease expired before the task completed', updated_at = now()
+						last_error = 'worker lease expired before the task completed', last_error_code = 'worker_lease_expired', updated_at = now()
 					WHERE id = $1 AND deleted_at IS NULL
 				`, item.certificateID, item.kind); err != nil {
 					return 0, err
@@ -2950,10 +3207,15 @@ func (s *Store) CompleteJob(ctx context.Context, job ClaimedJob, workerID string
 // refreshAutomationRun derives the batch state from its durable child jobs so
 // a successful target can never hide a failure from another target.
 func refreshAutomationRun(ctx context.Context, tx pgx.Tx, runID string) error {
-	var taskID, lastError string
+	var taskID, lastError, lastErrorCode string
 	var total, succeeded, failed, active, waiting int
 	if err := tx.QueryRow(ctx, `
 		SELECT r.automation_task_id::text, COALESCE((
+			SELECT e.error_code FROM workflow_executions e
+			JOIN jobs failed_job ON failed_job.id = e.job_id
+			WHERE failed_job.automation_run_id = r.id AND failed_job.status = 'failed' AND e.status = 'failed'
+			ORDER BY e.finished_at DESC NULLS LAST LIMIT 1
+		), ''), COALESCE((
 			SELECT e.error_message FROM workflow_executions e
 			JOIN jobs failed_job ON failed_job.id = e.job_id
 			WHERE failed_job.automation_run_id = r.id AND failed_job.status = 'failed' AND e.status = 'failed'
@@ -2968,7 +3230,7 @@ func refreshAutomationRun(ctx context.Context, tx pgx.Tx, runID string) error {
 		LEFT JOIN jobs j ON j.automation_run_id = r.id
 		WHERE r.id = $1
 		GROUP BY r.id, r.automation_task_id
-	`, runID).Scan(&taskID, &lastError, &total, &succeeded, &failed, &active, &waiting); err != nil {
+	`, runID).Scan(&taskID, &lastErrorCode, &lastError, &total, &succeeded, &failed, &active, &waiting); err != nil {
 		return err
 	}
 	status := "queued"
@@ -2988,9 +3250,10 @@ func refreshAutomationRun(ctx context.Context, tx pgx.Tx, runID string) error {
 	if _, err := tx.Exec(ctx, `
 		UPDATE automation_runs
 		SET status = $2, total_jobs = $3, succeeded_jobs = $4, failed_jobs = $5,
-			last_error = NULLIF($6, ''), finished_at = CASE WHEN $7 THEN now() ELSE NULL END, updated_at = now()
+			last_error = NULLIF($6, ''), last_error_code = NULLIF($7, ''),
+			finished_at = CASE WHEN $8 THEN now() ELSE NULL END, updated_at = now()
 		WHERE id = $1
-	`, runID, status, total, succeeded, failed, truncateError(lastError), finished); err != nil {
+	`, runID, status, total, succeeded, failed, truncateError(lastError), lastErrorCode, finished); err != nil {
 		return err
 	}
 	taskStatus := status
@@ -3000,7 +3263,14 @@ func refreshAutomationRun(ctx context.Context, tx pgx.Tx, runID string) error {
 	if status == "queued" || status == "running" {
 		taskStatus = "queued"
 	}
-	_, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = $2, last_error = CASE WHEN $2 = 'failed' THEN NULLIF($3, '') ELSE NULL END, updated_at = now() WHERE id = $1`, taskID, taskStatus, truncateError(lastError))
+	_, err := tx.Exec(ctx, `
+		UPDATE automation_tasks
+		SET last_status = $2,
+			last_error = CASE WHEN $2 = 'failed' THEN NULLIF($3, '') ELSE NULL END,
+			last_error_code = CASE WHEN $2 = 'failed' THEN 'execution_failed' ELSE NULL END,
+			updated_at = now()
+		WHERE id = $1
+	`, taskID, taskStatus, truncateError(lastError))
 	return err
 }
 
@@ -3037,7 +3307,7 @@ func (s *Store) FailJob(ctx context.Context, job ClaimedJob, workerID string, fa
 			return false, err
 		}
 	} else if job.AutomationTaskID != "" {
-		if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'failed', last_error = $2, updated_at = now() WHERE id = $1`, job.AutomationTaskID, truncateError(failure.Message)); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE automation_tasks SET last_status = 'failed', last_error = $2, last_error_code = $3, updated_at = now() WHERE id = $1`, job.AutomationTaskID, truncateError(failure.Message), failure.Code); err != nil {
 			return false, err
 		}
 	}
@@ -3047,13 +3317,13 @@ func (s *Store) FailJob(ctx context.Context, job ClaimedJob, workerID string, fa
 		if _, err := tx.Exec(ctx, `
 			UPDATE certificates
 			SET status = CASE
-					WHEN $3::boolean AND $4::text = 'issue' THEN 'failed'
-					WHEN $3::boolean AND $4::text = 'renew' AND current_certificate_version_id IS NOT NULL THEN 'issued'
+					WHEN $4::boolean AND $5::text = 'issue' THEN 'failed'
+					WHEN $4::boolean AND $5::text = 'renew' AND current_certificate_version_id IS NOT NULL THEN 'issued'
 					ELSE status
 				END,
-				last_error = $2, updated_at = now()
+				last_error = $2, last_error_code = $3, updated_at = now()
 			WHERE id = $1 AND deleted_at IS NULL
-		`, job.CertificateID, truncateError(failure.Message), terminal, job.Kind); err != nil {
+		`, job.CertificateID, truncateError(failure.Message), failure.Code, terminal, job.Kind); err != nil {
 			return false, err
 		}
 	}

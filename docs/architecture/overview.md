@@ -328,7 +328,7 @@ MVP 不实现任意流程图，而用明确的自动化任务类型：`renew_cer
 | `next_run_at` / `last_run_at` | 调度时间 |
 | `last_status` / `last_error` | 最近一次任务状态和脱敏错误 |
 
-`automation_task_targets` 表连接 `deploy_alb` 任务和一个或多个 `deployment_targets`，并按目标保存远端 `CertId` 及其 `last_uploaded_version_id`；这是必要的，因为不同 ALB 目标可能使用不同阿里云账号，证书资源不能跨账号复用。目标表是内部可复用资源，不作为独立的日常操作入口：创建 ALB 自动化时可直接配置云凭证、地域、ALB 与监听器，服务端会在同一事务中复用或创建目标并建立关联。删除任务后，没有其他任务或旧部署引用的目标会被软删除。`upload_ssl` 任务需要一个云凭证并在任务级保存远端证书状态，`deploy_alb` 任务在证书版本更新后自动执行“上传 SSL → 更新 ALB”。新建任务只保存配置，不会立即调用外部 API；用户可手动执行，或等待证书版本更新/续期调度触发。只有 `renew_certificate` 任务参与周期扫描；新建后的首次检查从一个完整检查周期后开始，暂停或删除该任务即可停止自动续期。旧的 `renew_enabled` 仅作为历史字段保留，不再作为新策略入口。
+`automation_task_targets` 表连接 `deploy_alb` 任务和一个或多个 `deployment_targets`，并按目标保存远端 `CertId` 及其 `last_uploaded_version_id`；这是必要的，因为不同 ALB 目标可能使用不同阿里云账号，证书资源不能跨账号复用。目标表是内部可复用资源，不作为独立的日常操作入口：创建 ALB 自动化时可直接配置云凭证、地域、ALB 与监听器，服务端会在同一事务中复用或创建目标并建立关联。删除任务后，没有其他任务或旧部署引用的目标会被软删除。`upload_ssl` 任务需要一个云凭证并在任务级保存远端证书状态，`deploy_alb` 任务在证书版本更新后自动执行“上传 SSL → 更新 ALB”。新建任务只保存配置，不会立即调用外部 API；用户可手动执行，等待证书版本更新，或等待周期调度。三类任务都使用 `interval_minutes`：续期任务按周期检查续期窗口，未到窗口仅记录检查并推进下次时间；上传和 ALB 任务按周期对账当前证书版本并同步云资源。证书更新事件仍会立即触发上传或 ALB 更新，不受周期等待影响。暂停或删除任务会停止后续调度；已有运行中的任务按其快照完成。旧的 `renew_enabled` 仅作为历史字段保留，不再作为新策略入口。
 
 `notification_endpoints` 表：
 
@@ -632,11 +632,11 @@ MVP 使用本地邮箱账户，角色只有 `admin` 和 `user`。管理员可查
 
 最少指标：
 
-- `certflow_executions_total{kind,status}`
-- `certflow_execution_duration_seconds{kind}`
+- `certflow_http_requests_total{method,route,status}` 与 `certflow_http_request_duration_seconds{method,route,status}`
+- `certflow_jobs_completed_total{kind,status}` 与 `certflow_job_duration_seconds{kind,status}`
 - `certflow_certificates_expiring_total{window}`
 - `certflow_job_queue_depth`
-- `certflow_webhook_deliveries_total{status}`
+- `certflow_notification_deliveries_total{channel,status}`
 - `certflow_provider_requests_total{provider,operation,status}`
 
 健康检查：

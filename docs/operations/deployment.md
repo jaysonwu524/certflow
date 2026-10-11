@@ -139,4 +139,5 @@ CERTFLOW_CONSOLE_IMAGE=ghcr.io/jaysonwu524/certflow-console:sha-<commit>
 
 - 仅通过 Caddy、Nginx 或 Traefik 对外暴露 80/443，并代理到 `127.0.0.1:3000`。
 - 不公开 5432 或 Control Plane 的 8080 端口。
+- Prometheus 通过私有 Docker 网络访问 `control-plane:8080/metrics`；不得在公网反向代理中转发 `/metrics`，除非已限制到 Prometheus 的固定私网来源。
 - 启用 Docker 日志轮转、磁盘用量告警和数据库备份。

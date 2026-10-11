@@ -102,6 +102,7 @@ export function AdminDashboardCharts({ dashboard }: { dashboard: AdminDashboard 
         top: 8,
         itemWidth: 9,
         itemHeight: 9,
+        itemGap: 10,
         textStyle: { color: palette.muted, fontSize: 12 },
         data: [t("dashboard.chart.succeeded"), t("dashboard.chart.failed"), t("dashboard.chart.running")],
       },
@@ -153,7 +154,13 @@ export function AdminDashboardCharts({ dashboard }: { dashboard: AdminDashboard 
         trigger: "item",
         valueFormatter: (value) => t("dashboard.certificatesUnit", { count: String(value) }),
       },
-      legend: { bottom: 2, textStyle: { color: palette.muted, fontSize: 12 } },
+      legend: {
+        bottom: 2,
+        itemWidth: 9,
+        itemHeight: 9,
+        itemGap: 8,
+        textStyle: { color: palette.muted, fontSize: 11 },
+      },
       series: [
         {
           type: "pie",
@@ -186,6 +193,7 @@ export function AdminDashboardCharts({ dashboard }: { dashboard: AdminDashboard 
         top: 6,
         itemWidth: 9,
         itemHeight: 9,
+        itemGap: 10,
         textStyle: { color: palette.muted, fontSize: 12 },
         data: [t("dashboard.chart.healthy"), t("dashboard.chart.paused"), t("dashboard.chart.attention")],
       },
@@ -200,7 +208,7 @@ export function AdminDashboardCharts({ dashboard }: { dashboard: AdminDashboard 
         data: [t("nav.automations")],
         axisTick: { show: false },
         axisLine: { show: false },
-        axisLabel: { color: palette.muted, fontSize: 12 },
+        axisLabel: { show: false },
       },
       series: [
         {

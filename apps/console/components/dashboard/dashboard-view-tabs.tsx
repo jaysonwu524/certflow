@@ -5,7 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { ReactNode } from "react";
 import { useLocale } from "@/components/providers/locale-provider";
 
-export type DashboardView = "system" | "mine";
+export type DashboardView = "system" | "observability" | "mine";
 
 export function DashboardViewTabs({ view, children }: { view: DashboardView; children: ReactNode }) {
   const pathname = usePathname();
@@ -15,8 +15,13 @@ export function DashboardViewTabs({ view, children }: { view: DashboardView; chi
 
   function changeView(nextView: DashboardView) {
     const params = new URLSearchParams(searchParams.toString());
-    if (nextView === "system") params.delete("view");
-    else params.set("view", nextView);
+    if (nextView === "system") {
+      params.delete("view");
+      params.delete("scope");
+    } else {
+      params.set("view", nextView);
+      params.delete("scope");
+    }
     const query = params.toString();
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
   }
@@ -30,11 +35,15 @@ export function DashboardViewTabs({ view, children }: { view: DashboardView; chi
       <Tabs.ListContainer>
         <Tabs.List aria-label={t("dashboard.viewLabel")}>
           <Tabs.Tab id="system">
-            {t("dashboard.system")}
+            {t("overview.scopeAll")}
             <Tabs.Indicator />
           </Tabs.Tab>
           <Tabs.Tab id="mine">
-            {t("dashboard.mine")}
+            {t("overview.scopeMine")}
+            <Tabs.Indicator />
+          </Tabs.Tab>
+          <Tabs.Tab id="observability">
+            {t("overview.runtime")}
             <Tabs.Indicator />
           </Tabs.Tab>
         </Tabs.List>

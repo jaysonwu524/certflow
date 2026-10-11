@@ -19,70 +19,19 @@ const executionLabels: Record<string, TranslationKey> = {
   cleanup: "execution.cleanup",
 };
 
-type MetricDefinition = {
-  key:
-    | "activeUsers"
-    | "certificatesTotal"
-    | "certificatesExpiring7d"
-    | "jobsQueued"
-    | "failedExecutions24h"
-    | "invalidCloudCredentials";
+type CoreMetric = {
+  key: "certificatesTotal" | "certificatesExpiring7d" | "jobsQueued" | "failedExecutions24h";
   label: TranslationKey;
-  note: (
-    dashboard: AdminDashboard,
-    t: (key: TranslationKey, values?: Record<string, string | number>) => string,
-  ) => string;
+  note: (dashboard: AdminDashboard, t: (key: TranslationKey, values?: Record<string, string | number>) => string) => string;
   href: string;
-  tone: "healthy" | "active" | "attention" | "danger";
+  tone: "active" | "attention" | "danger";
 };
 
-const metricDefinitions: MetricDefinition[] = [
-  {
-    key: "activeUsers",
-    label: "admin.activeUsers",
-    note: (data, t) => t("admin.activeUsersNote", { count: data.metrics.newUsers30d }),
-    href: "/settings",
-    tone: "healthy",
-  },
-  {
-    key: "certificatesTotal",
-    label: "admin.managedCertificates",
-    note: (data, t) => t("admin.issuedCertificatesNote", { count: data.metrics.certificatesIssued }),
-    href: "/certificates",
-    tone: "active",
-  },
-  {
-    key: "certificatesExpiring7d",
-    label: "admin.expiringSevenDays",
-    note: (data, t) => t("admin.expiringThirtyDaysNote", { count: data.metrics.certificatesExpiring30d }),
-    href: "/certificates",
-    tone: "attention",
-  },
-  {
-    key: "jobsQueued",
-    label: "admin.queuedJobs",
-    note: (data, t) => t("admin.runningJobsNote", { count: data.metrics.jobsRunning }),
-    href: "/executions",
-    tone: "active",
-  },
-  {
-    key: "failedExecutions24h",
-    label: "admin.failedTwentyFourHours",
-    note: (data, t) => t("admin.failureRateNote", { rate: data.metrics.executionFailureRate30d }),
-    href: "/executions",
-    tone: "danger",
-  },
-  {
-    key: "invalidCloudCredentials",
-    label: "admin.invalidCloudCredentials",
-    note: (data, t) =>
-      t("admin.invalidResourcesNote", {
-        dns: data.metrics.invalidDNSAccounts,
-        acme: data.metrics.invalidACMEAccounts,
-      }),
-    href: "/cloud-credentials",
-    tone: "danger",
-  },
+const coreMetrics: CoreMetric[] = [
+  { key: "certificatesTotal", label: "admin.managedCertificates", note: (data, t) => t("admin.issuedCertificatesNote", { count: data.metrics.certificatesIssued }), href: "/certificates", tone: "active" },
+  { key: "certificatesExpiring7d", label: "admin.expiringSevenDays", note: (data, t) => t("admin.expiringThirtyDaysNote", { count: data.metrics.certificatesExpiring30d }), href: "/certificates", tone: "attention" },
+  { key: "jobsQueued", label: "admin.queuedJobs", note: (data, t) => t("admin.runningJobsNote", { count: data.metrics.jobsRunning }), href: "/executions", tone: "active" },
+  { key: "failedExecutions24h", label: "admin.failedTwentyFourHours", note: (data, t) => t("admin.failureRateNote", { rate: data.metrics.executionFailureRate30d }), href: "/executions", tone: "danger" },
 ];
 
 function HealthTag({
@@ -122,20 +71,18 @@ export function AdminDashboardOverview({ dashboard }: { dashboard: AdminDashboar
 
   return (
     <div className="dashboard-layout admin-dashboard-layout">
-      {hasCriticalRisk ? (
-        <div className="admin-risk-banner" role="alert">
-          <AlertTriangle size={18} aria-hidden="true" />
-          <span>
-            {t("admin.riskBanner", {
-              expiring: dashboard.metrics.certificatesExpiring7d,
-              failed: dashboard.metrics.failedExecutions24h,
-            })}
-          </span>
-          <Link href="/executions">
-            {t("admin.viewFailedExecutions")} <ArrowUpRight size={14} />
-          </Link>
+      <section className={`admin-overview-hero ${hasCriticalRisk ? "admin-overview-hero-attention" : "admin-overview-hero-healthy"}`}>
+        <div className="admin-overview-heading">
+          <span className="admin-overview-eyebrow">{t("nav.dashboard")}</span>
+          <h1>{t("admin.systemHealth")}</h1>
+          <p>{t("admin.executionTrendDescription")}</p>
         </div>
-      ) : null}
+        <div className="admin-overview-status">
+          <div className="admin-overview-status-icon" aria-hidden="true">{hasCriticalRisk ? <AlertTriangle size={20} /> : <CheckCircle2 size={20} />}</div>
+          <div><strong>{hasCriticalRisk ? t("admin.riskStatus") : t("admin.healthyStatus")}</strong><span>{hasCriticalRisk ? t("admin.riskStatusDescription") : t("admin.healthyStatusDescription")}</span></div>
+          {hasCriticalRisk ? <Link className="admin-overview-status-link" href="/executions">{t("admin.viewFailedExecutions")} <ArrowUpRight size={14} /></Link> : null}
+        </div>
+      </section>
 
       <section className="admin-health-strip" aria-label={t("admin.systemHealth")}>
         <div className="admin-health-heading">
@@ -165,7 +112,7 @@ export function AdminDashboardOverview({ dashboard }: { dashboard: AdminDashboar
       </section>
 
       <section className="metric-grid admin-metric-grid" aria-label={t("admin.kpiLabel")}>
-        {metricDefinitions.map((metric) => (
+        {coreMetrics.map((metric) => (
           <Link className="metric-link" href={metric.href} key={metric.key}>
             <Card className={`metric-card metric-card-${metric.tone}`}>
               <div className="metric-label">{t(metric.label)}</div>
@@ -286,6 +233,11 @@ export function AdminDashboardOverview({ dashboard }: { dashboard: AdminDashboar
           <Link className="panel-header-link" href="/settings">
             <UsersRound size={14} /> {t("admin.userManagement")}
           </Link>
+        </div>
+        <div className="admin-resource-summary">
+          <div><span>{t("admin.activeUsers")}</span><strong>{dashboard.metrics.activeUsers}</strong></div>
+          <div><span>{t("admin.invalidCloudCredentials")}</span><strong className={invalidResources > 0 ? "is-danger" : ""}>{invalidResources}</strong></div>
+          <div><span>{t("admin.automationCount")}</span><strong>{dashboard.resourceOwners.reduce((total, owner) => total + owner.automationCount, 0)}</strong></div>
         </div>
         {dashboard.resourceOwners.length === 0 ? (
           <p className="admin-panel-empty">{t("admin.noUserResources")}</p>

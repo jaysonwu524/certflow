@@ -24,6 +24,7 @@ import { formatDate, formatDateTime } from "@/lib/presentation";
 import { ResourcePagination } from "@/components/ui/resource-pagination";
 import { TableActions } from "@/components/ui/table-actions";
 import { useLocale } from "@/components/providers/locale-provider";
+import { translateErrorCode } from "@/lib/error-message";
 
 type ACMEAccountDraft = {
   name: string;
@@ -596,7 +597,7 @@ function ACMEAccountDetailsModal({ account, onClose }: { account: ACMEAccount | 
                     </TextField>
                     {account.lastError ? (
                       <p className="form-error" role="alert">
-                        {t("acme.lastVerificationFailed", { error: account.lastError })}
+                        {t("acme.lastVerificationFailed", { error: translateErrorCode(account.lastErrorCode, account.lastError, t) })}
                       </p>
                     ) : null}
                     <p className="field-help">{t("acme.privateKeyProtected")}</p>

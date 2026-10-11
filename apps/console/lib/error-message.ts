@@ -14,6 +14,17 @@ const errorCodeKeys: Record<string, TranslationKey> = {
   dns_provider_unavailable: "error.dnsProviderUnavailable",
   aliyun_unavailable: "error.aliyunUnavailable",
   aliyun_name_duplicate: "error.aliyunNameDuplicate",
+  cloud_credential_verification_failed: "error.cloudCredentialVerificationFailed",
+  acme_account_verification_failed: "error.acmeAccountVerificationFailed",
+  dns_account_verification_failed: "error.dnsAccountVerificationFailed",
+  deployment_failed: "error.deploymentFailed",
+  execution_failed: "error.executionFailed",
+  handler_panic: "error.handlerPanic",
+  credentials_missing: "error.credentialsMissing",
+  permission_denied: "error.permissionDenied",
+  timeout: "error.timeout",
+  network_error: "error.networkError",
+  certificate_unavailable: "error.certificateUnavailable",
 };
 
 export function translateErrorCode(code: string, fallback: string, t: Translate) {

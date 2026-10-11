@@ -42,8 +42,16 @@ openssl rand -base64 32
 
 `.env`、`.env.production` 和私钥文件已被 `.gitignore` 忽略。模板文件只允许包含占位符。
 
+## 审计与反向代理
+
+- 所有已认证的写操作会记录操作者、资源、请求 ID、响应状态和连接来源 IP；请求体不会写入审计事件。
+- 默认以 TCP 连接的 `RemoteAddr` 作为来源 IP，不信任客户端提交的 `X-Forwarded-For`，避免伪造审计来源。
+- 在 Caddy、Nginx 或 Traefik 后部署时，请保留应用与代理之间的私有网络边界；如需代理真实客户端 IP，应在未来版本启用显式可信代理列表后再开放该能力。
+- Prometheus 指标在 Control Plane 的 `/metrics` 提供且不要求业务登录。仅允许私网 Prometheus 或受限代理访问，绝不把 8080 或 `/metrics` 公开到公网；完整配置见[可观测性文档](./observability.md)。
+
 ## 运行时配置
 
 - SMTP 由管理员在控制台“系统设置”配置，SMTP 密码只写入、不回显。
 - 用户可在个人中心配置失败通知 Webhook；Webhook 仅允许公网 HTTPS 端点。
 - 云凭证、DNS 账户和 ACME 账户在控制台中创建，私钥和 Secret 不回显。
+- 所有密钥写入均使用与资源上下文绑定的加密认证数据保护；密文被替换到其他字段或资源后无法解密。

@@ -20,6 +20,24 @@ type Notification struct {
 	ReadAt *time.Time `json:"readAt"`
 }
 
+// NotificationQuery is intentionally limited to non-sensitive, indexed or
+// bounded fields so the in-app inbox can page through a user's event history
+// without exposing global operational data.
+type NotificationQuery struct {
+	Page     int
+	PageSize int
+	Query    string
+	Unread   bool
+}
+
+type NotificationPage struct {
+	Data        []Notification `json:"data"`
+	Page        int            `json:"page"`
+	PageSize    int            `json:"pageSize"`
+	Total       int            `json:"total"`
+	UnreadCount int            `json:"unreadCount"`
+}
+
 type Dashboard struct {
 	ActiveCertificates int `json:"activeCertificates"`
 	ExpiringSoon       int `json:"expiringSoon"`
@@ -114,6 +132,7 @@ type CertificateSummary struct {
 	Fingerprint    string     `json:"fingerprint"`
 	LastIssuedAt   *time.Time `json:"lastIssuedAt"`
 	LastError      string     `json:"lastError"`
+	LastErrorCode  string     `json:"lastErrorCode"`
 	CreatedAt      time.Time  `json:"createdAt"`
 }
 
@@ -214,6 +233,7 @@ type CloudCredentialSummary struct {
 	Status         string     `json:"status"`
 	LastVerifiedAt *time.Time `json:"lastVerifiedAt"`
 	LastError      string     `json:"lastError"`
+	LastErrorCode  string     `json:"lastErrorCode"`
 	CreatedAt      time.Time  `json:"createdAt"`
 }
 
@@ -238,6 +258,7 @@ type ACMEAccountSummary struct {
 	Status              string     `json:"status"`
 	LastVerifiedAt      *time.Time `json:"lastVerifiedAt"`
 	LastError           string     `json:"lastError"`
+	LastErrorCode       string     `json:"lastErrorCode"`
 	CertificateCount    int        `json:"certificateCount"`
 	AutomationCount     int        `json:"automationCount"`
 	CreatedAt           time.Time  `json:"createdAt"`
@@ -261,6 +282,7 @@ type DNSAccountSummary struct {
 	Status                      string     `json:"status"`
 	LastVerifiedAt              *time.Time `json:"lastVerifiedAt"`
 	LastError                   string     `json:"lastError"`
+	LastErrorCode               string     `json:"lastErrorCode"`
 	VerifiedCredentialVersionID string     `json:"verifiedCredentialVersionId"`
 	CreatedAt                   time.Time  `json:"createdAt"`
 }
@@ -301,6 +323,7 @@ type CertificateDeploymentSummary struct {
 	Enabled        bool       `json:"enabled"`
 	LastDeployedAt *time.Time `json:"lastDeployedAt"`
 	LastError      string     `json:"lastError"`
+	LastErrorCode  string     `json:"lastErrorCode"`
 }
 
 type CreateCertificateDeploymentInput struct {
@@ -321,6 +344,7 @@ type AutomationTaskSummary struct {
 	LastRunAt         *time.Time `json:"lastRunAt"`
 	LastStatus        string     `json:"lastStatus"`
 	LastError         string     `json:"lastError"`
+	LastErrorCode     string     `json:"lastErrorCode"`
 	TargetCount       int        `json:"targetCount"`
 	CloudCredentialID string     `json:"cloudCredentialId"`
 	TargetIDs         []string   `json:"targetIds"`
@@ -340,6 +364,7 @@ type AutomationRunSummary struct {
 	StartedAt            *time.Time `json:"startedAt"`
 	FinishedAt           *time.Time `json:"finishedAt"`
 	LastError            string     `json:"lastError"`
+	LastErrorCode        string     `json:"lastErrorCode"`
 	CreatedAt            time.Time  `json:"createdAt"`
 }
 

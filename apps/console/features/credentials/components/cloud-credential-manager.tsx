@@ -24,6 +24,7 @@ import { formatDate, formatDateTime } from "@/lib/presentation";
 import { ResourcePagination } from "@/components/ui/resource-pagination";
 import { TableActions } from "@/components/ui/table-actions";
 import { useLocale } from "@/components/providers/locale-provider";
+import { translateErrorCode } from "@/lib/error-message";
 
 type CredentialDraft = {
   name: string;
@@ -591,7 +592,7 @@ function CredentialDetailsModal({
                       <Input />
                     </TextField>
                     {credential.lastError ? (
-                      <TextField className="w-full" value={credential.lastError} isReadOnly>
+                      <TextField className="w-full" value={translateErrorCode(credential.lastErrorCode, credential.lastError, t)} isReadOnly>
                         <Label>{t("cloud.lastError")}</Label>
                         <Input />
                       </TextField>

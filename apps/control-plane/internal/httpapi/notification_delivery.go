@@ -157,6 +157,7 @@ func (s *Server) runNotificationDeliveries(ctx context.Context, logger *slog.Log
 			}
 			if err := s.deliverNotification(ctx, *delivery); err != nil {
 				logger.Warn("deliver notification", "delivery_id", delivery.ID, "channel", delivery.Channel, "error", err)
+				s.metrics.NotificationDelivered(delivery.Channel, "failed")
 				if updateErr := s.store.FailNotificationDelivery(context.Background(), delivery.ID, err.Error()); updateErr != nil {
 					logger.Error("record notification delivery failure", "delivery_id", delivery.ID, "error", updateErr)
 				}
@@ -164,7 +165,10 @@ func (s *Server) runNotificationDeliveries(ctx context.Context, logger *slog.Log
 			}
 			if err := s.store.CompleteNotificationDelivery(context.Background(), delivery.ID); err != nil {
 				logger.Error("complete notification delivery", "delivery_id", delivery.ID, "error", err)
+				s.metrics.NotificationDelivered(delivery.Channel, "failed")
+				continue
 			}
+			s.metrics.NotificationDelivered(delivery.Channel, "succeeded")
 		}
 		select {
 		case <-ctx.Done():

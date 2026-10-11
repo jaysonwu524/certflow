@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	dnsaliyun "github.com/regenbio/certflow/apps/control-plane/internal/dns/aliyun"
 	"github.com/regenbio/certflow/apps/control-plane/internal/domain"
 	"github.com/regenbio/certflow/apps/control-plane/internal/id"
+	"github.com/regenbio/certflow/apps/control-plane/internal/observability"
 	"github.com/regenbio/certflow/apps/control-plane/internal/store"
 	"golang.org/x/crypto/acme"
 )
@@ -40,17 +42,27 @@ type Server struct {
 	sessionTTL  time.Duration
 	sessionIdle time.Duration
 	realtime    *realtimeHub
+	metrics     *observability.Metrics
 	streamCtx   context.Context
 	stopStreams context.CancelFunc
 }
 
 type notificationReadRequest struct {
 	IDs []int64 `json:"ids"`
+	All bool    `json:"all"`
 }
+
+type adminObservabilityResponse struct {
+	observability.Snapshot
+	DatabaseReady     bool  `json:"databaseReady"`
+	DatabaseLatencyMS int64 `json:"databaseLatencyMs"`
+}
+
+type requestIDContextKey struct{}
 
 func New(s *store.Store, box *cryptobox.Box, sessionDurations ...time.Duration) *Server {
 	streamCtx, stopStreams := context.WithCancel(context.Background())
-	server := &Server{store: s, box: box, sessionTTL: 8 * time.Hour, sessionIdle: 30 * time.Minute, realtime: newRealtimeHub(), streamCtx: streamCtx, stopStreams: stopStreams}
+	server := &Server{store: s, box: box, sessionTTL: 8 * time.Hour, sessionIdle: 30 * time.Minute, realtime: newRealtimeHub(), metrics: observability.NewMetrics(), streamCtx: streamCtx, stopStreams: stopStreams}
 	if len(sessionDurations) > 0 {
 		server.sessionTTL = sessionDurations[0]
 	}
@@ -66,11 +78,17 @@ func (s *Server) StopRealtimeStreams() {
 	s.stopStreams()
 }
 
+// Metrics exposes the process-local collector to background runtimes. The
+// collector contains no request or resource data and is safe to share.
+func (s *Server) Metrics() *observability.Metrics { return s.metrics }
+
 func (s *Server) Router() http.Handler {
 	router := chi.NewRouter()
 	router.Use(requestID)
 	router.Use(localizeErrors)
+	router.Use(s.observeHTTP)
 	router.Use(recoverer)
+	router.Handle("/metrics", s.metrics.Handler())
 
 	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -91,6 +109,7 @@ func (s *Server) Router() http.Handler {
 
 	router.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.requireAuth)
+		api.Use(s.auditMutations)
 		api.Get("/events", s.streamEvents)
 		api.Get("/notifications", s.listNotifications)
 		api.Post("/notifications/read", s.markNotificationsRead)
@@ -101,6 +120,7 @@ func (s *Server) Router() http.Handler {
 		api.Post("/profile/sessions/revoke-others", s.revokeOtherProfileSessions)
 		api.Get("/dashboard", s.dashboard)
 		api.Get("/admin/dashboard", s.adminDashboard)
+		api.Get("/admin/observability", s.adminObservability)
 		api.Get("/cloud-credentials", s.listCloudCredentials)
 		api.Post("/cloud-credentials", s.createCloudCredential)
 		api.Get("/cloud-credentials/{credentialID}", s.getCloudCredential)
@@ -165,6 +185,97 @@ func (s *Server) Router() http.Handler {
 	})
 
 	return router
+}
+
+// auditMutations records who changed a resource and whether the request
+// succeeded. It deliberately excludes request bodies so credentials, private
+// keys, SMTP passwords, and webhook secrets can never enter audit_events.
+func (s *Server) auditMutations(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
+		recorder := &auditResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		resourceType, resourceID := auditResource(r)
+		summary := map[string]any{"method": r.Method, "path": r.URL.Path, "status": recorder.status}
+		if err := s.store.RecordAuditEvent(r.Context(), store.AuditEvent{
+			ActorSubject: actor(r).ID,
+			Action:       strings.ToLower(r.Method),
+			ResourceType: resourceType,
+			ResourceID:   resourceID,
+			RequestID:    requestIDFromContext(r.Context()),
+			SourceIP:     requestSourceIP(r),
+			Summary:      summary,
+		}); err != nil {
+			slog.Warn("record audit event", "error", err, "action", r.Method, "path", r.URL.Path)
+		}
+	})
+}
+
+type auditResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *auditResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *auditResponseWriter) Write(value []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(value)
+}
+
+func auditResource(r *http.Request) (string, string) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "api" || parts[1] != "v1" {
+		return "api", ""
+	}
+	resource := strings.TrimSuffix(parts[2], "s")
+	if resource == "auth" || resource == "profile" || resource == "settings" {
+		return resource, ""
+	}
+	resourceID := ""
+	if len(parts) > 3 && looksLikeUUID(parts[3]) {
+		resourceID = parts[3]
+	}
+	return resource, resourceID
+}
+
+func looksLikeUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		if char == '-' && (index == 8 || index == 13 || index == 18 || index == 23) {
+			continue
+		}
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func requestSourceIP(r *http.Request) string {
+	// X-Forwarded-For is client-controlled unless a trusted proxy boundary is
+	// explicitly configured. Prefer RemoteAddr so audit records cannot be
+	// forged by an arbitrary caller.
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func (s *Server) listCloudCredentials(w http.ResponseWriter, r *http.Request) {
@@ -1417,6 +1528,29 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dashboard)
 }
 
+// adminObservability exposes a small process-local runtime snapshot to the
+// administrator console. Full metric history remains the responsibility of
+// Prometheus/Grafana, which scrapes the unauthenticated private /metrics path.
+func (s *Server) adminObservability(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	err := s.store.Ping(ctx)
+	cancel()
+	response := adminObservabilityResponse{
+		Snapshot:          s.metrics.Snapshot(),
+		DatabaseReady:     err == nil,
+		DatabaseLatencyMS: time.Since(started).Milliseconds(),
+	}
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, response)
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
 func (s *Server) listCertificates(w http.ResponseWriter, r *http.Request) {
 	certificates, err := s.store.ListCertificates(personalScope(r))
 	if err != nil {
@@ -1521,12 +1655,22 @@ func (s *Server) getCertificateRelations(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
-	notifications, err := s.store.ListNotifications(r.Context(), 30)
+	page, pageSize, err := notificationPagination(r)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid_notification_pagination", "page must be positive and pageSize must be between 1 and 100")
+		return
+	}
+	notifications, err := s.store.ListNotifications(r.Context(), domain.NotificationQuery{
+		Page:     page,
+		PageSize: pageSize,
+		Query:    r.URL.Query().Get("q"),
+		Unread:   r.URL.Query().Get("unread") == "true",
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notifications_unavailable", "could not load notifications")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": notifications})
+	writeJSON(w, http.StatusOK, notifications)
 }
 
 func (s *Server) markNotificationsRead(w http.ResponseWriter, r *http.Request) {
@@ -1534,15 +1678,40 @@ func (s *Server) markNotificationsRead(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &input) {
 		return
 	}
-	if len(input.IDs) > 100 {
+	if !input.All && len(input.IDs) > 100 {
 		writeError(w, http.StatusUnprocessableEntity, "notification_read_limit", "at most 100 notifications can be updated at once")
 		return
 	}
-	if err := s.store.MarkNotificationsRead(r.Context(), input.IDs); err != nil {
+	var err error
+	if input.All {
+		err = s.store.MarkAllNotificationsRead(r.Context())
+	} else {
+		err = s.store.MarkNotificationsRead(r.Context(), input.IDs)
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification_read_failed", "could not update notification state")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func notificationPagination(r *http.Request) (int, int, error) {
+	page, pageSize := 1, 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("page")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			return 0, 0, errors.New("invalid page")
+		}
+		page = parsed
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("pageSize")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			return 0, 0, errors.New("invalid page size")
+		}
+		pageSize = parsed
+	}
+	return page, pageSize, nil
 }
 
 func (s *Server) listExecutions(w http.ResponseWriter, r *http.Request) {
@@ -1791,7 +1960,7 @@ func validateAutomation(input domain.CreateAutomationTaskInput) error {
 	if input.ActionType != "renew_certificate" && input.ActionType != "upload_ssl" && input.ActionType != "deploy_alb" && input.ActionType != "renew_and_deploy_alb" {
 		return errors.New("automation action type is invalid")
 	}
-	if input.ActionType == "renew_certificate" && (input.IntervalMinutes < 60 || input.IntervalMinutes > 10080) {
+	if input.IntervalMinutes != 0 && (input.IntervalMinutes < 60 || input.IntervalMinutes > 10080) {
 		return errors.New("interval must be between 60 minutes and 7 days")
 	}
 	if input.ActionType == "upload_ssl" && strings.TrimSpace(input.CloudCredentialID) == "" {
@@ -1890,6 +2059,62 @@ func redundantExactDomain(domains []string) (string, string) {
 	return "", ""
 }
 
+// observeHTTP records route-level latency after chi has resolved the final
+// route pattern. It deliberately excludes Prometheus scrapes themselves so
+// monitoring traffic cannot hide application traffic in the request series.
+func (s *Server) observeHTTP(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.metrics.HTTPStarted(r.Method)
+		started := time.Now()
+		recorder := &metricsResponseWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		route := chi.RouteContext(r.Context()).RoutePattern()
+		if route == "" {
+			route = "unmatched"
+		}
+		s.metrics.HTTPFinished(r.Method, route, recorder.status, time.Since(started))
+	})
+}
+
+// metricsResponseWriter retains streaming support for the authenticated SSE
+// endpoint while capturing the final status code for the HTTP middleware.
+type metricsResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (w *metricsResponseWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.status = status
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *metricsResponseWriter) Write(value []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(value)
+}
+
+func (w *metricsResponseWriter) Flush() {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *metricsResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-ID")
@@ -1897,14 +2122,20 @@ func requestID(next http.Handler) http.Handler {
 			requestID = id.New()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, requestID)))
 	})
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	requestID, _ := ctx.Value(requestIDContextKey{}).(string)
+	return requestID
 }
 
 func recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if recover() != nil {
+			if recovered := recover(); recovered != nil {
+				slog.Error("http handler panicked", "request_id", requestIDFromContext(r.Context()), "method", r.Method, "path", r.URL.Path, "error", fmt.Sprint(recovered))
 				writeError(w, http.StatusInternalServerError, "internal_error", "unexpected server error")
 			}
 		}()

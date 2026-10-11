@@ -17,6 +17,7 @@ import (
 
 const (
 	defaultPollInterval = time.Second
+	queueDepthInterval  = 30 * time.Second
 	// ACME orders and DNS propagation can legitimately take several minutes.
 	// The worker still has lease recovery, but the normal lease must exceed the
 	// provider polling window to avoid duplicate attempts.
@@ -49,6 +50,21 @@ func WaitingUser(code, message string) error {
 
 type Handler func(context.Context, store.ClaimedJob, *Reporter) error
 
+// Observer receives low-cardinality operational events. It keeps the worker
+// independent from a specific metrics implementation and makes no resource or
+// error text available for use as a metric label.
+type Observer interface {
+	JobStarted(kind string)
+	JobFinished(kind, status string, duration time.Duration)
+	SetJobQueueDepth(depth int)
+}
+
+type noopObserver struct{}
+
+func (noopObserver) JobStarted(string)                         {}
+func (noopObserver) JobFinished(string, string, time.Duration) {}
+func (noopObserver) SetJobQueueDepth(int)                      {}
+
 type Worker struct {
 	store         *store.Store
 	logger        *slog.Logger
@@ -56,21 +72,28 @@ type Worker struct {
 	pollInterval  time.Duration
 	leaseDuration time.Duration
 	handlers      map[string]Handler
+	observer      Observer
+	lastQueuePoll time.Time
 }
 
-func New(s *store.Store, logger *slog.Logger) *Worker {
+func New(s *store.Store, logger *slog.Logger, observers ...Observer) *Worker {
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
 		hostname = "certflow"
 	}
-	return &Worker{
+	worker := &Worker{
 		store:         s,
 		logger:        logger,
 		workerID:      hostname + ":" + id.New(),
 		pollInterval:  defaultPollInterval,
 		leaseDuration: defaultLeaseDuration,
 		handlers:      make(map[string]Handler),
+		observer:      noopObserver{},
 	}
+	if len(observers) > 0 && observers[0] != nil {
+		worker.observer = observers[0]
+	}
+	return worker
 }
 
 func (w *Worker) Register(kind string, handler Handler) {
@@ -107,6 +130,7 @@ func (w *Worker) tick(ctx context.Context) {
 		w.logger.Error("recover expired jobs", "error", err)
 		return
 	}
+	w.refreshQueueDepth(ctx)
 	job, err := w.store.ClaimJob(ctx, w.workerID, w.leaseDuration)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
@@ -118,29 +142,55 @@ func (w *Worker) tick(ctx context.Context) {
 		return
 	}
 	claimed = job
+	w.runClaimedJob(ctx, *job)
+}
+
+func (w *Worker) runClaimedJob(ctx context.Context, job store.ClaimedJob) {
+	started := time.Now()
+	status := "failed"
+	w.observer.JobStarted(job.Kind)
+	defer func() { w.observer.JobFinished(job.Kind, status, time.Since(started)) }()
 
 	reporter := &Reporter{store: w.store, executionID: job.ExecutionID}
 	handler, ok := w.handlers[job.Kind]
 	if !ok {
-		w.finishFailure(ctx, *job, Permanent("handler_unavailable", "no handler is configured for this job type"))
+		status = w.finishFailure(ctx, job, Permanent("handler_unavailable", "no handler is configured for this job type"))
 		return
 	}
-	if err := handler(ctx, *job, reporter); err != nil {
-		w.finishFailure(ctx, *job, err)
+	if err := handler(ctx, job, reporter); err != nil {
+		status = w.finishFailure(ctx, job, err)
 		return
 	}
-	if err := w.store.CompleteJob(ctx, *job, w.workerID); err != nil && !errors.Is(err, context.Canceled) {
+	if err := w.store.CompleteJob(ctx, job, w.workerID); err != nil && !errors.Is(err, context.Canceled) {
 		w.logger.Error("complete job", "job_id", job.ID, "error", err)
+		return
 	}
+	status = "succeeded"
 }
 
-func (w *Worker) finishFailure(ctx context.Context, job store.ClaimedJob, err error) {
+func (w *Worker) refreshQueueDepth(ctx context.Context) {
+	if !w.lastQueuePoll.IsZero() && time.Since(w.lastQueuePoll) < queueDepthInterval {
+		return
+	}
+	w.lastQueuePoll = time.Now()
+	depth, err := w.store.QueuedJobCount(ctx)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			w.logger.Warn("count queued jobs", "error", err)
+		}
+		return
+	}
+	w.observer.SetJobQueueDepth(depth)
+}
+
+func (w *Worker) finishFailure(ctx context.Context, job store.ClaimedJob, err error) string {
 	failure := toFailure(err)
 	if failure.WaitingUser {
 		if err := w.store.MarkJobWaitingUser(ctx, job, w.workerID, store.JobFailure{Code: failure.Code, Message: failure.Message}); err != nil {
 			w.logger.Error("pause job for user input", "job_id", job.ID, "error", err)
+			return "failed"
 		}
-		return
+		return "waiting_user"
 	}
 	var retryDelay *time.Duration
 	if failure.Retryable && job.Attempt < job.MaxAttempts {
@@ -153,9 +203,13 @@ func (w *Worker) finishFailure(ctx context.Context, job store.ClaimedJob, err er
 	retried, finishErr := w.store.FailJob(ctx, job, w.workerID, store.JobFailure{Code: failure.Code, Message: failure.Message}, retryDelay)
 	if finishErr != nil && !errors.Is(finishErr, context.Canceled) {
 		w.logger.Error("fail job", "job_id", job.ID, "error", finishErr)
-		return
+		return "failed"
 	}
 	w.logger.Warn("job failed", "job_id", job.ID, "kind", job.Kind, "code", failure.Code, "retry_scheduled", retried)
+	if retried {
+		return "retry"
+	}
+	return "failed"
 }
 
 func toFailure(err error) *Error {

@@ -59,6 +59,18 @@ export type AdminDashboard = {
   }>;
 };
 
+export type AdminObservability = {
+  startedAt: string;
+  uptimeSeconds: number;
+  databaseReady: boolean;
+  databaseLatencyMs: number;
+  queueDepth: number;
+  jobsInFlight: Array<{ kind: string; count: number }>;
+  certificatesExpiring7: number;
+  certificatesExpiring30: number;
+  lastSchedulerRun: { status: string; queued: number; finishedAt: string };
+};
+
 export type Certificate = {
   id: string;
   name: string;
@@ -70,6 +82,7 @@ export type Certificate = {
   fingerprint: string;
   lastIssuedAt: string | null;
   lastError: string;
+  lastErrorCode: string;
   createdAt: string;
 };
 
@@ -107,6 +120,7 @@ export type CertificateDeploymentReference = {
   autoDeploy: boolean;
   lastDeployedAt: string | null;
   lastError: string;
+  lastErrorCode: string;
 };
 
 export type CertificateRelations = {
@@ -139,6 +153,7 @@ export type CloudCredential = {
   status: string;
   lastVerifiedAt: string | null;
   lastError: string;
+  lastErrorCode: string;
   createdAt: string;
 };
 
@@ -152,6 +167,7 @@ export type ACMEAccount = {
   status: string;
   lastVerifiedAt: string | null;
   lastError: string;
+  lastErrorCode: string;
   certificateCount: number;
   automationCount: number;
   createdAt: string;
@@ -167,6 +183,7 @@ export type DNSAccount = {
   status: string;
   lastVerifiedAt: string | null;
   lastError: string;
+  lastErrorCode: string;
   verifiedCredentialVersionId: string;
   createdAt: string;
 };
@@ -192,6 +209,7 @@ export type CertificateDeployment = {
   enabled: boolean;
   lastDeployedAt: string | null;
   lastError: string;
+  lastErrorCode: string;
 };
 
 export type AutomationTask = {
@@ -206,6 +224,7 @@ export type AutomationTask = {
   lastRunAt: string | null;
   lastStatus: string;
   lastError: string;
+  lastErrorCode: string;
   targetCount: number;
   cloudCredentialId: string;
   targetIds: string[];
@@ -225,6 +244,7 @@ export type AutomationRun = {
   startedAt: string | null;
   finishedAt: string | null;
   lastError: string;
+  lastErrorCode: string;
   createdAt: string;
 };
 
@@ -288,6 +308,20 @@ export function getAdminDashboard() {
     riskCertificates: [],
     failedExecutions: [],
     resourceOwners: [],
+  });
+}
+
+export function getAdminObservability() {
+  return apiGet<AdminObservability>("/admin/observability", {
+    startedAt: "",
+    uptimeSeconds: 0,
+    databaseReady: false,
+    databaseLatencyMs: 0,
+    queueDepth: 0,
+    jobsInFlight: [],
+    certificatesExpiring7: 0,
+    certificatesExpiring30: 0,
+    lastSchedulerRun: { status: "unknown", queued: 0, finishedAt: "" },
   });
 }
 

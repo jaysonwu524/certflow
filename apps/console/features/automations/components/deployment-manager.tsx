@@ -10,6 +10,8 @@ import { ResourcePagination } from "@/components/ui/resource-pagination";
 import { ResourceEmptyState } from "@/components/ui/resource-empty-state";
 import { TableActions } from "@/components/ui/table-actions";
 import { formatDateTime } from "@/lib/presentation";
+import { translateErrorCode } from "@/lib/error-message";
+import { useLocale } from "@/components/providers/locale-provider";
 import type {
   ALBListener,
   ALBLoadBalancer,
@@ -58,6 +60,7 @@ export function DeploymentManager({
   initialAutomations: AutomationTask[];
 }) {
   const router = useRouter();
+  const { t } = useLocale();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const targets = initialTargets;
@@ -354,7 +357,7 @@ export function DeploymentManager({
           name: taskName.trim(),
           certificateId,
           actionType,
-          intervalMinutes: actionType === "renew_certificate" ? Number(intervalMinutes) : 60,
+          intervalMinutes: Number(intervalMinutes),
           cloudCredentialId: actionType === "upload_ssl" ? uploadCredentialID : "",
           deploymentTargetIds: actionType === "deploy_alb" && useExistingTargets ? selectedTargetIDs : [],
           inlineDeploymentTarget: shouldConfigureInlineTarget
@@ -538,6 +541,7 @@ export function DeploymentManager({
             <AutomationTable
               items={paginatedAutomations}
               pending={pending}
+              t={t}
               onDelete={(item) => setConfirmDelete({ kind: "automation", id: item.id, name: item.name })}
               onEdit={editAutomation}
               onOpen={openAutomation}
@@ -605,29 +609,34 @@ export function DeploymentManager({
                 </Select.Popover>
               </Select>
             </div>
-            {actionType === "renew_certificate" ? (
-              <div className="field">
-                <label htmlFor="automation-interval">检查周期</label>
-                <Select
-                  id="automation-interval"
-                  selectedKey={intervalMinutes}
-                  onSelectionChange={(key) => setIntervalMinutes(String(key))}
-                >
-                  <Select.Trigger>
-                    <Select.Value />
-                  </Select.Trigger>
-                  <Select.Popover>
-                    <ListBox>
-                      <ListBox.Item id="60">每小时</ListBox.Item>
-                      <ListBox.Item id="360">每 6 小时</ListBox.Item>
-                      <ListBox.Item id="720">每 12 小时</ListBox.Item>
-                      <ListBox.Item id="1440">每天</ListBox.Item>
-                      <ListBox.Item id="10080">每周</ListBox.Item>
-                    </ListBox>
-                  </Select.Popover>
-                </Select>
-              </div>
-            ) : null}
+            <div className="field">
+              <label htmlFor="automation-interval">
+                {actionType === "renew_certificate" ? "检查周期" : "同步周期"}
+              </label>
+              <Select
+                id="automation-interval"
+                selectedKey={intervalMinutes}
+                onSelectionChange={(key) => setIntervalMinutes(String(key))}
+              >
+                <Select.Trigger>
+                  <Select.Value />
+                </Select.Trigger>
+                <Select.Popover>
+                  <ListBox>
+                    <ListBox.Item id="60">每小时</ListBox.Item>
+                    <ListBox.Item id="360">每 6 小时</ListBox.Item>
+                    <ListBox.Item id="720">每 12 小时</ListBox.Item>
+                    <ListBox.Item id="1440">每天</ListBox.Item>
+                    <ListBox.Item id="10080">每周</ListBox.Item>
+                  </ListBox>
+                </Select.Popover>
+              </Select>
+              <span className="field-help">
+                {actionType === "renew_certificate"
+                  ? "到达续期窗口才会发起签发；未到窗口时仅记录本次检查。"
+                  : "会校验当前证书版本并同步云证书或 ALB 配置；证书更新时仍会立即触发。"}
+              </span>
+            </div>
             {actionType === "upload_ssl" ? (
               <div className="field field-wide">
                 <label htmlFor="upload-credential">阿里云凭证</label>
@@ -896,7 +905,7 @@ export function DeploymentManager({
                 <dd>
                   {automationDetail.actionType === "renew_certificate"
                     ? formatInterval(automationDetail.intervalMinutes)
-                    : "证书更新时"}
+                    : `每 ${formatInterval(automationDetail.intervalMinutes)} 同步（证书更新时立即触发）`}
                 </dd>
               </div>
               <div>
@@ -911,12 +920,10 @@ export function DeploymentManager({
                   <StatusTag status={automationDetail.enabled ? "active" : "disabled"} />
                 </dd>
               </div>
-              {automationDetail.actionType === "renew_certificate" ? (
-                <div>
-                  <dt>下次检查</dt>
-                  <dd>{formatDateTime(automationDetail.nextRunAt)}</dd>
-                </div>
-              ) : null}
+              <div>
+                <dt>{automationDetail.actionType === "renew_certificate" ? "下次检查" : "下次同步"}</dt>
+                <dd>{formatDateTime(automationDetail.nextRunAt)}</dd>
+              </div>
               <div>
                 <dt>目标数量</dt>
                 <dd>{automationDetail.targetCount}</dd>
@@ -924,7 +931,7 @@ export function DeploymentManager({
               {automationDetail.lastError ? (
                 <div className="certificate-detail-wide">
                   <dt>最近错误</dt>
-                  <dd className="table-error">{automationDetail.lastError}</dd>
+                  <dd className="table-error">{translateErrorCode(automationDetail.lastErrorCode, automationDetail.lastError, t)}</dd>
                 </div>
               ) : null}
             </dl>
@@ -959,7 +966,7 @@ export function DeploymentManager({
                         </span>
                         <StatusTag status={run.status === "partial_failed" ? "failed" : run.status} />
                       </div>
-                      {run.lastError ? <small className="table-error">{run.lastError}</small> : null}
+                      {run.lastError ? <small className="table-error">{translateErrorCode(run.lastErrorCode, run.lastError, t)}</small> : null}
                     </div>
                   ))
                 : null}
@@ -1131,6 +1138,7 @@ function AutomationTable({
   onDelete,
   onToggle,
   pending,
+  t,
 }: {
   items: AutomationTask[];
   onRun: (item: AutomationTask) => void;
@@ -1139,6 +1147,7 @@ function AutomationTable({
   onDelete: (item: AutomationTask) => void;
   onToggle: (item: AutomationTask) => void;
   pending: boolean;
+  t: ReturnType<typeof useLocale>["t"];
 }) {
   return (
     <Table className="table-pinned-columns">
@@ -1148,8 +1157,8 @@ function AutomationTable({
             <Table.Column isRowHeader>名称</Table.Column>
             <Table.Column>证书</Table.Column>
             <Table.Column>动作</Table.Column>
-            <Table.Column>触发方式</Table.Column>
-            <Table.Column>下次检查</Table.Column>
+            <Table.Column>执行周期</Table.Column>
+            <Table.Column>下次执行</Table.Column>
             <Table.Column>最近执行</Table.Column>
             <Table.Column>任务状态</Table.Column>
             <Table.Column>状态</Table.Column>
@@ -1164,10 +1173,10 @@ function AutomationTable({
                 <Table.Cell>
                   {item.actionType === "renew_certificate"
                     ? `每 ${formatInterval(item.intervalMinutes)} 检查`
-                    : "证书更新时"}
+                    : `每 ${formatInterval(item.intervalMinutes)} 同步`}
                 </Table.Cell>
                 <Table.Cell>
-                  {item.actionType === "renew_certificate" ? formatDateTime(item.nextRunAt) : "-"}
+                  {formatDateTime(item.nextRunAt)}
                 </Table.Cell>
                 <Table.Cell>{formatDateTime(item.lastRunAt)}</Table.Cell>
                 <Table.Cell>
@@ -1176,7 +1185,7 @@ function AutomationTable({
                 <Table.Cell>
                   <div className="table-status-stack">
                     <StatusTag status={item.lastStatus} />
-                    {item.lastError ? <small className="table-error">{item.lastError}</small> : null}
+                    {item.lastError ? <small className="table-error">{translateErrorCode(item.lastErrorCode, item.lastError, t)}</small> : null}
                   </div>
                 </Table.Cell>
                 <Table.Cell>

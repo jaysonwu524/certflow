@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/regenbio/certflow/apps/control-plane/internal/aliyunrpc"
 	"github.com/regenbio/certflow/apps/control-plane/internal/certupload"
 	_ "github.com/regenbio/certflow/apps/control-plane/internal/cloudprovider/aliyun"
 	"github.com/regenbio/certflow/apps/control-plane/internal/config"
@@ -53,19 +54,20 @@ func main() {
 	}
 
 	apiServer := httpapi.New(database, box, time.Duration(config.SessionTTL)*time.Hour, time.Duration(config.SessionIdle)*time.Minute)
+	aliyunrpc.SetObserver(apiServer.Metrics())
 	httpServer := &http.Server{
 		Addr:              config.Addr,
 		Handler:           apiServer.Router(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	httpServer.RegisterOnShutdown(apiServer.StopRealtimeStreams)
-	worker := job.New(database, logger)
+	worker := job.New(database, logger, apiServer.Metrics())
 	issuanceProcessor := issuance.New(database, box)
 	worker.Register("issue", issuanceProcessor.Handle)
 	worker.Register("renew", issuanceProcessor.Handle)
 	worker.Register("upload", certupload.New(database, box).Handle)
 	worker.Register("deploy", deployment.New(database, box).Handle)
-	renewalScheduler := renewal.New(database, logger)
+	renewalScheduler := renewal.New(database, logger, apiServer.Metrics())
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)

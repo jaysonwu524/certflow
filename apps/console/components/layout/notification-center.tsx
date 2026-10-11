@@ -1,8 +1,8 @@
 "use client";
 
-import { Badge, Button, ListBox, Popover } from "@heroui/react";
-import { Bell, BellRing, CheckCheck, Clock3, FileKey2, ListChecks, ShieldCheck } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Badge, Button, Checkbox, Input, ListBox, Popover } from "@heroui/react";
+import { Bell, BellRing, CheckCheck, Clock3, FileKey2, ListChecks, Search, ShieldCheck } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useLocale, type TranslationKey } from "@/components/providers/locale-provider";
 import { ModalCancelButton, ResourceModal } from "@/components/ui/resource-modal";
@@ -18,6 +18,14 @@ type Notification = {
   payload: { kind?: string; certificateId?: string; name?: string; operation?: string; resourceType?: string };
   createdAt: string;
   readAt: string | null;
+};
+
+type NotificationPage = {
+  data: Notification[];
+  page: number;
+  pageSize: number;
+  total: number;
+  unreadCount: number;
 };
 
 const statusLabels: Record<string, TranslationKey> = {
@@ -53,25 +61,44 @@ export function NotificationCenter() {
   const { locale, t } = useLocale();
   const router = useRouter();
   const [items, setItems] = useState<Notification[]>([]);
+
+  const [total, setTotal] = useState(0);
+
+  const [unreadTotal, setUnreadTotal] = useState(0);
+
+  const [page, setPage] = useState(1);
+
+  const [query, setQuery] = useState("");
+
+  const [unreadOnly, setUnreadOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+
+  const [loadingMore, setLoadingMore] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [selected, setSelected] = useState<Notification | null>(null);
 
-  const load = useCallback(async () => {
+
+  const load = useCallback(async (nextPage = 1, append = false, nextQuery = query, nextUnreadOnly = unreadOnly) => {
     try {
-      const response = await apiRequest<{ data: Notification[] }>("/api/notifications");
-      setItems(response.data);
+      const params = new URLSearchParams({ page: String(nextPage), pageSize: "12" });
+      if (nextQuery.trim()) params.set("q", nextQuery.trim());
+      if (nextUnreadOnly) params.set("unread", "true");
+      const response = await apiRequest<NotificationPage>(`/api/notifications?${params}`);
+      setItems((current) => (append ? [...current, ...response.data] : response.data));
+      setPage(response.page);
+      setTotal(response.total);
+      setUnreadTotal(response.unreadCount);
     } catch {
       // A transient failure must not affect the primary Header controls.
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [query, unreadOnly]);
 
   useEffect(() => {
-    const initialLoad = window.setTimeout(() => void load(), 0);
-    const update = () => void load();
+    const initialLoad = window.setTimeout(() => void load(1, false), 0);
+    const update = () => void load(1, false);
     window.addEventListener("certflow:realtime", update);
     return () => {
       window.clearTimeout(initialLoad);
@@ -79,14 +106,23 @@ export function NotificationCenter() {
     };
   }, [load]);
 
-  const unreadCount = useMemo(() => items.filter((item) => !item.readAt).length, [items]);
+  const unreadCount = unreadTotal;
+
+  function applyFilters(nextQuery: string, nextUnreadOnly: boolean) {
+    setQuery(nextQuery);
+    setUnreadOnly(nextUnreadOnly);
+    setLoading(true);
+    void load(1, false, nextQuery, nextUnreadOnly);
+  }
 
   async function markRead(ids: number[]) {
     if (ids.length === 0) return;
     setUpdating(true);
     try {
       await apiRequest("/api/notifications/read", { method: "POST", body: { ids } });
+      const newlyRead = ids.filter((id) => items.some((item) => item.id === id && !item.readAt)).length;
       setItems((current) => current.map((item) => (ids.includes(item.id) ? { ...item, readAt: new Date().toISOString() } : item)));
+      setUnreadTotal((current) => Math.max(0, current - newlyRead));
     } finally {
       setUpdating(false);
     }
@@ -136,13 +172,48 @@ export function NotificationCenter() {
               <Popover.Heading>{t("notification.title")}</Popover.Heading>
               <p>{unreadCount ? t("notification.unread").replace("{count}", String(unreadCount)) : t("notification.allRead")}</p>
             </div>
-            <Button variant="tertiary" size="sm" isDisabled={unreadCount === 0 || updating} onPress={() => void markRead(items.filter((item) => !item.readAt).map((item) => item.id))}>
+
+            <Button variant="tertiary" size="sm" isDisabled={unreadCount === 0 || updating} onPress={() => {
+
+              setUpdating(true);
+
+              void apiRequest("/api/notifications/read", { method: "POST", body: { all: true } })
+
+                .then(() => {
+
+                  setItems((current) => current.map((item) => ({ ...item, readAt: item.readAt ?? new Date().toISOString() })));
+
+                  setUnreadTotal(0);
+
+                })
+
+                .finally(() => setUpdating(false));
+
+            }}>
               <CheckCheck size={15} />
               {t("notification.markAllRead")}
             </Button>
           </div>
+
+          <div className="notification-filter-bar">
+            <div className="resource-search">
+              <Search size={15} aria-hidden="true" />
+              <Input
+                aria-label={t("notification.search")}
+                placeholder={t("notification.search")}
+                value={query}
+                onChange={(event) => applyFilters(event.target.value, unreadOnly)}
+              />
+            </div>
+            <Checkbox isSelected={unreadOnly} onChange={(selected) => applyFilters(query, selected)}>
+              <Checkbox.Content>
+                <Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>
+                <span>{t("notification.unreadOnly")}</span>
+              </Checkbox.Content>
+            </Checkbox>
+          </div>
           {loading ? <div className="notification-empty">{t("notification.loading")}</div> : null}
-          {!loading && items.length === 0 ? <div className="notification-empty"><BellRing size={18} /><span>{t("notification.empty")}</span></div> : null}
+          {!loading && items.length === 0 ? <div className="notification-empty"><BellRing size={18} /><span>{query || unreadOnly ? t("notification.noResults") : t("notification.empty")}</span></div> : null}
           {!loading && items.length > 0 ? (
             <ListBox aria-label={t("notification.title")} className="notification-list" onAction={(key) => {
               const item = items.find((entry) => entry.id === Number(key));
@@ -162,6 +233,17 @@ export function NotificationCenter() {
                 );
               })}
             </ListBox>
+          ) : null}
+
+          {!loading && items.length > 0 && items.length < total ? (
+            <div className="notification-load-more">
+              <Button variant="tertiary" size="sm" isDisabled={loadingMore} onPress={() => {
+                setLoadingMore(true);
+                void load(page + 1, true).finally(() => setLoadingMore(false));
+              }}>
+                {loadingMore ? t("notification.loadingMore") : t("notification.loadMore")}
+              </Button>
+            </div>
           ) : null}
         </Popover.Dialog>
       </Popover.Content>

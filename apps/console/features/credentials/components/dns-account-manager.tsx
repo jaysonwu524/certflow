@@ -25,6 +25,7 @@ import { useLocale } from "@/components/providers/locale-provider";
 import { ResourcePagination } from "@/components/ui/resource-pagination";
 import { ResourceEmptyState } from "@/components/ui/resource-empty-state";
 import { TableActions } from "@/components/ui/table-actions";
+import { translateErrorCode } from "@/lib/error-message";
 
 type DNSAccountDraft = {
   name: string;
@@ -641,7 +642,7 @@ function DNSAccountDetailsModal({
                       <Label>{t("common.description")}</Label>
                       <Input />
                     </TextField>
-                    <TextField className="w-full" value={account.lastError || "-"} isReadOnly>
+                    <TextField className="w-full" value={account.lastError ? translateErrorCode(account.lastErrorCode, account.lastError, t) : "-"} isReadOnly>
                       <Label>{t("dns.lastError")}</Label>
                       <Input />
                     </TextField>

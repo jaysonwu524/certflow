@@ -32,6 +32,7 @@ import type {
 } from "@/lib/api";
 import { formatDate } from "@/lib/presentation";
 import { useLocale } from "@/components/providers/locale-provider";
+import { translateErrorCode } from "@/lib/error-message";
 
 type CertificateDetail = Certificate & {
   acmeAccountId: string;
@@ -248,7 +249,7 @@ export function CertificateList({
                       <div className="table-status-stack">
                         <StatusTag status={certificate.status} />
                         {certificate.lastError ? (
-                          <span className="table-error">{certificate.lastError}</span>
+                          <span className="table-error">{translateErrorCode(certificate.lastErrorCode, certificate.lastError, t)}</span>
                         ) : null}
                       </div>
                     </Table.Cell>
@@ -974,7 +975,7 @@ function CertificateOverview({ certificate }: { certificate: Certificate }) {
       </dl>
       {certificate.lastError ? (
         <div className="form-error" role="alert">
-          {certificate.lastError}
+          {translateErrorCode(certificate.lastErrorCode, certificate.lastError, t)}
         </div>
       ) : null}
       {loadError ? (

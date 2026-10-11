@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/regenbio/certflow/apps/control-plane/internal/id"
@@ -36,6 +37,36 @@ type Client struct {
 	nonce      func() string
 }
 
+// Observer is intentionally limited to bounded provider metadata. Operation
+// names are fixed API actions, while credentials, resource IDs and messages
+// remain outside the observability surface.
+type Observer interface {
+	ProviderRequestFinished(provider, operation, status string)
+}
+
+var observerConfig struct {
+	sync.RWMutex
+	observer Observer
+}
+
+// SetObserver configures process-wide RPC instrumentation during startup.
+// Clients read the observer at call time so clients constructed by provider
+// packages before a configuration change remain observable.
+func SetObserver(observer Observer) {
+	observerConfig.Lock()
+	defer observerConfig.Unlock()
+	observerConfig.observer = observer
+}
+
+func observe(action, status string) {
+	observerConfig.RLock()
+	observer := observerConfig.observer
+	observerConfig.RUnlock()
+	if observer != nil {
+		observer.ProviderRequestFinished("aliyun", action, status)
+	}
+}
+
 const defaultRequestTimeout = 45 * time.Second
 
 func New(httpClient *http.Client) *Client {
@@ -50,6 +81,8 @@ func New(httpClient *http.Client) *Client {
 // Call sends a signed Aliyun RPC request. Provider messages are returned only
 // after stripping whitespace so callers can map them to stable public errors.
 func (c *Client) Call(ctx context.Context, endpoint, version, action string, credentials Credentials, params url.Values, target any) error {
+	status := "failed"
+	defer func() { observe(action, status) }()
 	if strings.TrimSpace(credentials.AccessKeyID) == "" || strings.TrimSpace(credentials.AccessKeySecret) == "" {
 		return &Error{Code: "credentials_missing", Message: "Aliyun credentials are missing"}
 	}
@@ -93,11 +126,13 @@ func (c *Client) Call(ctx context.Context, endpoint, version, action string, cre
 		return &Error{Code: strings.ToLower(provider.Code), Message: safeMessage(provider.Message)}
 	}
 	if target == nil {
+		status = "succeeded"
 		return nil
 	}
 	if err := json.Unmarshal(body, target); err != nil {
 		return &Error{Code: "invalid_provider_response", Message: "Aliyun API returned an invalid response"}
 	}
+	status = "succeeded"
 	return nil
 }
 
